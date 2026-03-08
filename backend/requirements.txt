@@ -1,9 +1,15 @@
+# Web API
 fastapi==0.104.1
-uvicorn==0.24.0
-pydantic==2.5.0
+uvicorn[standard]==0.24.0
 python-multipart==0.0.6
-pillow==10.1.0
-numpy==1.26.2
-opencv-python==4.8.1.78
-requests==2.31.0
 
+# Data validation & types
+pydantic==2.5.0
+
+# Image processing
+Pillow>=10.1.0
+numpy>=1.26.2
+opencv-python>=4.8.1
+
+# HTTP client (optional, for outbound requests)
+requests>=2.31.0
