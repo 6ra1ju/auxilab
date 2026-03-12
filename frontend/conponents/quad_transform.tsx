@@ -1,6 +1,8 @@
+/// <reference types="vite/client" />
 import React from 'react';
 import type { ContoursData, SelectedQuadPoint } from './fill_img';
 
+const API_URL = import.meta.env.VITE_API_URL || "http://localhost:8000";
 interface QuadTransformSidebarProps {
   contoursData: ContoursData | null;
   selectedQuadContourIds: number[];
@@ -70,7 +72,7 @@ export const QuadTransformSidebar: React.FC<QuadTransformSidebarProps> = ({
                 for (const id of ids) {
                   if (!quadPoints[id]) {
                     try {
-                      const res = await fetch('http://localhost:8000/get_quad_points', {
+                      const res = await fetch(`${API_URL}/get-quad-points`, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ img: currentImage || selectedImage }),
@@ -117,7 +119,7 @@ export const QuadTransformSidebar: React.FC<QuadTransformSidebarProps> = ({
 
                     if (!quadPoints[cid] && contoursData) {
                       try {
-                        const response = await fetch('http://localhost:8000/get_quad_points', {
+                        const response = await fetch(`${API_URL}/get-quad-points`, {
                           method: 'POST',
                           headers: { 'Content-Type': 'application/json' },
                           body: JSON.stringify({ img: currentImage || selectedImage }),
