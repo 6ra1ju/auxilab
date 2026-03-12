@@ -41,6 +41,9 @@ export interface SelectedQuadPoint {
   pointIndex: number;
 }
 
+// API base URL – ưu tiên cấu hình từ Vite, fallback về localhost:8000
+const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+
 const STORAGE_KEY = 'image-enhance-state';
 
 const FillImage = () => {
@@ -141,7 +144,7 @@ const FillImage = () => {
         
         try {
           // Chuẩn hóa ảnh về binary ngay khi upload
-          const response = await fetch('http://localhost:8000/normalize_binary', {
+          const response = await fetch(`${API_URL}/normalize_binary`, {
             method: 'POST',
             headers: {
               'Content-Type': 'application/json',
@@ -204,7 +207,7 @@ const FillImage = () => {
     setActiveTool(tool);
     
     try {
-      const response = await fetch('http://localhost:8000/fill_img', {
+      const response = await fetch(`${API_URL}/fill_img`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -256,7 +259,7 @@ const FillImage = () => {
     setActiveTool('get_contours');
     
     try {
-      const response = await fetch('http://localhost:8000/get_contours', {
+      const response = await fetch(`${API_URL}/get_contours`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -379,7 +382,7 @@ const FillImage = () => {
       let currentImg = contoursData.originalImg;
       
       for (const contourId of selectedContourIds) {
-        const response = await fetch('http://localhost:8000/fill_contour', {
+        const response = await fetch(`${API_URL}/fill_contour`, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -625,7 +628,7 @@ const FillImage = () => {
       // Sử dụng ảnh hiện tại đang được hiển thị (currentImage)
       const workingImg = currentImage || selectedImage;
       
-      const response = await fetch('http://localhost:8000/get_quad_points', {
+      const response = await fetch(`${API_URL}/get_quad_points`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -706,7 +709,7 @@ const FillImage = () => {
         allQuadPoints[contourId.toString()] = points;
       }
       
-      const response = await fetch('http://localhost:8000/perspective_transform', {
+      const response = await fetch(`${API_URL}/perspective_transform`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
