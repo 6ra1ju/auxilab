@@ -57,6 +57,13 @@ class QuadTransformRequest(BaseModel):
     contours: List[Contour]
     allQuadPoints: dict  # Dictionary với key là contourId, value là list of QuadPoint
 
+
+class MinAreaQuadRequest(BaseModel):
+    """Danh sách đỉnh contour — trả về 4 góc hình chữ nhật bao nhỏ nhất (minAreaRect)."""
+
+    points: List[ContourPoint]
+
+
 def base64_to_image(base64_string: str) -> Image.Image:
     """Chuyển đổi base64 string thành PIL Image"""
     # Loại bỏ header của base64 nếu có (data:image/png;base64,)
@@ -225,6 +232,27 @@ def normalize_to_binary(img_array: np.ndarray) -> np.ndarray:
     
     return binary
 
+
+def smooth_binary_foreground(binary: np.ndarray, kernel_size: int = 3) -> np.ndarray:
+    """
+    Morphological opening nhẹ trên vùng trắng (foreground 255).
+    Giảm gờ trắng mỏng / nhiễu 1 pixel gần mép ảnh hoặc viền đen (findContours thường lởm chởm ở biên).
+    binary: uint8 2D, 0 = nền, 255 = trắng.
+    """
+    if binary.size == 0 or kernel_size < 2:
+        return binary
+    k = cv2.getStructuringElement(cv2.MORPH_RECT, (kernel_size, kernel_size))
+    return cv2.morphologyEx(binary, cv2.MORPH_OPEN, k, iterations=1)
+
+
+def smooth_binary_pil(image: Image.Image) -> Image.Image:
+    """Áp dụng smooth_binary_foreground cho PIL (L hoặc RGB grayscale)."""
+    arr = np.array(image)
+    if len(arr.shape) == 3:
+        arr = cv2.cvtColor(arr, cv2.COLOR_RGB2GRAY)
+    arr = smooth_binary_foreground(arr)
+    return Image.fromarray(arr)
+
 def normalize_image_to_binary(image: Image.Image) -> Image.Image:
     """Chuẩn hóa ảnh PIL về binary (0-1, trắng-đen)"""
     # Convert to RGB if needed
@@ -322,6 +350,9 @@ def get_contours_advanced(image: Image.Image, apply_symmetry: bool = True, small
         img_binary = centripetal_symmetric(img_gray)
     else:
         img_binary = normalize_to_binary(img_gray)
+
+    # Làm mượt biên trắng: bỏ gờ thừa gần mép ảnh / viền đen trước khi tìm contour
+    img_binary = smooth_binary_foreground(img_binary)
     
     # Tìm contours
     contours, _ = cv2.findContours(img_binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
@@ -469,24 +500,30 @@ def extract_contours_from_image(image: Image.Image) -> ContoursResponse:
         originalImg=original_base64
     )
 
+def min_area_quad_from_contour_points(points: List[ContourPoint]) -> List[QuadPoint]:
+    """
+    4 đỉnh của hình chữ nhật có diện tích nhỏ nhất bao quanh polygon (cv2.minAreaRect + boxPoints).
+    Dùng để reset quad trong Quad Transform về đúng hình chữ nhật bao quanh contour.
+    """
+    pts = np.array([[p.x, p.y] for p in points], dtype=np.float32)
+    if len(pts) < 3:
+        raise ValueError("Cần ít nhất 3 điểm")
+    rect = cv2.minAreaRect(pts)
+    box = cv2.boxPoints(rect)
+    return [QuadPoint(x=float(p[0]), y=float(p[1])) for p in box]
+
+
 def get_quad_points_for_contours(contours: List[Contour]) -> dict:
     """Lấy 4 điểm góc của hình tứ giác bao trùm cho mỗi contour"""
     result = {}
     for contour in contours:
-        # Chuyển đổi points sang numpy array
-        pts = np.array([[p.x, p.y] for p in contour.points], dtype=np.float32)
-        
-        if len(pts) < 3:
+        if len(contour.points) < 3:
             continue
-        
-        # Tìm hình chữ nhật nhỏ nhất có thể xoay
-        rect = cv2.minAreaRect(pts)
-        box = cv2.boxPoints(rect)  # Lấy 4 góc
-        
-        # Chuyển đổi sang list of QuadPoint
-        quad_points = [QuadPoint(x=float(p[0]), y=float(p[1])) for p in box]
-        result[contour.id] = quad_points
-    
+        try:
+            result[contour.id] = min_area_quad_from_contour_points(contour.points)
+        except ValueError:
+            continue
+
     return result
 
 def fill_polygon_in_image(image: Image.Image, quad_points: List[QuadPoint]) -> Image.Image:
@@ -513,34 +550,41 @@ def fill_polygon_in_image(image: Image.Image, quad_points: List[QuadPoint]) -> I
     return result_image
 
 def fill_all_polygons_in_image(image: Image.Image, all_quad_points: dict) -> Image.Image:
-    """Fill tất cả các polygon với trắng bên trong, đen bên ngoài"""
-    # Convert to RGB if needed
+    """
+    Với mỗi polygon trong all_quad_points: tô trắng (255) bên trong polygon đó
+    trên bản copy ảnh gốc (grayscale). Các pixel không thuộc polygon nào trong dict
+    giữ nguyên — cho phép Apply chỉ một phần contour (các contour khác giữ ảnh gốc).
+    """
     if image.mode != 'RGB':
         image = image.convert('RGB')
-    
+
     img_array = np.array(image)
     h, w = img_array.shape[:2]
-    
-    # Tạo ảnh binary mới (nền đen)
-    result_array = np.zeros((h, w), dtype=np.uint8)
-    
-    # Fill tất cả các polygon
+
+    if len(img_array.shape) == 3:
+        gray = cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY)
+    else:
+        gray = img_array.copy()
+
+    if not all_quad_points:
+        return Image.fromarray(gray)
+
+    result_array = gray.copy()
+
     for contour_id, quad_points in all_quad_points.items():
         if not quad_points or len(quad_points) < 3:
             continue
-        
-        # Chuyển đổi quad_points sang numpy array
+
         if isinstance(quad_points[0], dict):
             pts = np.array([[p["x"], p["y"]] for p in quad_points], dtype=np.int32)
         else:
             pts = np.array([[p.x, p.y] for p in quad_points], dtype=np.int32)
-        
-        # Fill polygon với màu trắng (255)
-        cv2.fillPoly(result_array, [pts], 255)
-    
-    # Convert back to PIL Image (grayscale binary)
+
+        mask = np.zeros((h, w), dtype=np.uint8)
+        cv2.fillPoly(mask, [pts], 255)
+        result_array[mask > 0] = 255
+
     result_image = Image.fromarray(result_array)
-    
     return result_image
 
 def fill_contour_in_image(image: Image.Image, contour: Contour, fill_color: Tuple[int, int, int]) -> Image.Image:

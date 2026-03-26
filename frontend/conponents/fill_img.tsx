@@ -11,7 +11,8 @@ export type Tool =
   | 'fill_min'
   | 'fill_max'
   | 'get_contours'
-  | 'quad_transform';
+  | 'quad_transform'
+  | 'cut_stretch';
 
 export interface ContourPoint {
   x: number;
@@ -45,6 +46,252 @@ export interface SelectedQuadPoint {
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 
 const STORAGE_KEY = 'image-enhance-state';
+
+const DEFAULT_SIMULATE_BLACK_THRESHOLD = 55;
+
+/** Cắt ảnh theo hàng ngang tại yCut, chèn insertPx hàng (extrude từ mép dưới phần trên / mép trên phần dưới) */
+function applyHorizontalCutStretch(
+  imageData: ImageData,
+  yCut: number,
+  insertPx: number,
+  fillMode: 'extrude' | 'solid',
+  solidRgb: [number, number, number]
+): ImageData {
+  const W = imageData.width;
+  const H = imageData.height;
+  const d = imageData.data;
+  const y = Math.max(1, Math.min(H - 1, Math.round(yCut)));
+  const g = Math.max(0, Math.round(insertPx));
+  if (g === 0) {
+    return new ImageData(new Uint8ClampedArray(d), W, H);
+  }
+  const newH = H + g;
+  const out = new ImageData(W, newH);
+  const od = out.data;
+  const refRow = y < H ? y : y - 1;
+
+  for (let row = 0; row < y; row++) {
+    for (let x = 0; x < W; x++) {
+      const si = (row * W + x) * 4;
+      const oi = (row * W + x) * 4;
+      od[oi] = d[si];
+      od[oi + 1] = d[si + 1];
+      od[oi + 2] = d[si + 2];
+      od[oi + 3] = d[si + 3];
+    }
+  }
+  for (let r = 0; r < g; r++) {
+    const yy = y + r;
+    for (let x = 0; x < W; x++) {
+      const oi = (yy * W + x) * 4;
+      if (fillMode === 'extrude') {
+        const si = (refRow * W + x) * 4;
+        od[oi] = d[si];
+        od[oi + 1] = d[si + 1];
+        od[oi + 2] = d[si + 2];
+        od[oi + 3] = d[si + 3];
+      } else {
+        od[oi] = solidRgb[0];
+        od[oi + 1] = solidRgb[1];
+        od[oi + 2] = solidRgb[2];
+        od[oi + 3] = 255;
+      }
+    }
+  }
+  for (let row = y; row < H; row++) {
+    const oy = row + g;
+    for (let x = 0; x < W; x++) {
+      const si = (row * W + x) * 4;
+      const oi = (oy * W + x) * 4;
+      od[oi] = d[si];
+      od[oi + 1] = d[si + 1];
+      od[oi + 2] = d[si + 2];
+      od[oi + 3] = d[si + 3];
+    }
+  }
+  return out;
+}
+
+/** Cắt ảnh theo cột dọc tại xCut, chèn insertPx cột */
+function applyVerticalCutStretch(
+  imageData: ImageData,
+  xCut: number,
+  insertPx: number,
+  fillMode: 'extrude' | 'solid',
+  solidRgb: [number, number, number]
+): ImageData {
+  const W = imageData.width;
+  const H = imageData.height;
+  const d = imageData.data;
+  const x0 = Math.max(1, Math.min(W - 1, Math.round(xCut)));
+  const g = Math.max(0, Math.round(insertPx));
+  if (g === 0) {
+    return new ImageData(new Uint8ClampedArray(d), W, H);
+  }
+  const newW = W + g;
+  const out = new ImageData(newW, H);
+  const od = out.data;
+  const refCol = x0 < W ? x0 : x0 - 1;
+
+  for (let row = 0; row < H; row++) {
+    for (let x = 0; x < x0; x++) {
+      const si = (row * W + x) * 4;
+      const oi = (row * newW + x) * 4;
+      od[oi] = d[si];
+      od[oi + 1] = d[si + 1];
+      od[oi + 2] = d[si + 2];
+      od[oi + 3] = d[si + 3];
+    }
+  }
+  for (let col = 0; col < g; col++) {
+    const ox = x0 + col;
+    for (let row = 0; row < H; row++) {
+      const oi = (row * newW + ox) * 4;
+      if (fillMode === 'extrude') {
+        const si = (row * W + refCol) * 4;
+        od[oi] = d[si];
+        od[oi + 1] = d[si + 1];
+        od[oi + 2] = d[si + 2];
+        od[oi + 3] = d[si + 3];
+      } else {
+        od[oi] = solidRgb[0];
+        od[oi + 1] = solidRgb[1];
+        od[oi + 2] = solidRgb[2];
+        od[oi + 3] = 255;
+      }
+    }
+  }
+  for (let row = 0; row < H; row++) {
+    for (let x = x0; x < W; x++) {
+      const si = (row * W + x) * 4;
+      const oi = (row * newW + x + g) * 4;
+      od[oi] = d[si];
+      od[oi + 1] = d[si + 1];
+      od[oi + 2] = d[si + 2];
+      od[oi + 3] = d[si + 3];
+    }
+  }
+  return out;
+}
+
+/** Hex #rrggbb → RGB */
+function hexToRgb(hex: string): { r: number; g: number; b: number } {
+  const h = hex.replace(/^#/, '');
+  const full =
+    h.length === 3
+      ? h
+          .split('')
+          .map((c) => c + c)
+          .join('')
+      : h.padEnd(6, '0').slice(0, 6);
+  const n = parseInt(full, 16);
+  if (Number.isNaN(n)) return { r: 0, g: 0, b: 0 };
+  return { r: (n >> 16) & 255, g: (n >> 8) & 255, b: n & 255 };
+}
+
+/** Thay pixel đen (RGB ≤ threshold) bằng màu vật liệu — dùng cho mô phỏng */
+function fillBlackWithMaterialColor(
+  src: string,
+  hexColor: string,
+  blackThreshold: number
+): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => {
+      const canvas = document.createElement('canvas');
+      canvas.width = img.width;
+      canvas.height = img.height;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) {
+        resolve(src);
+        return;
+      }
+      ctx.drawImage(img, 0, 0);
+      const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+      const { r: tr, g: tg, b: tb } = hexToRgb(hexColor);
+      const d = imageData.data;
+      const t = blackThreshold;
+      for (let i = 0; i < d.length; i += 4) {
+        const r = d[i];
+        const g = d[i + 1];
+        const b = d[i + 2];
+        if (r <= t && g <= t && b <= t) {
+          d[i] = tr;
+          d[i + 1] = tg;
+          d[i + 2] = tb;
+        }
+      }
+      ctx.putImageData(imageData, 0, 0);
+      resolve(canvas.toDataURL('image/png'));
+    };
+    img.onerror = () => reject(new Error('Không load được ảnh'));
+    img.src = src;
+  });
+}
+
+/** Đối xứng quad: Ox = trục ngang (ảnh: lật trên-dưới, y' = H−y); Oy = trục dọc (trái-phải, x' = W−x); both = qua tâm ảnh */
+export type QuadMirrorMode = 'ox' | 'oy' | 'both';
+
+function contourCentroidFromPoints(points: ContourPoint[]): { x: number; y: number } {
+  let sx = 0;
+  let sy = 0;
+  for (const p of points) {
+    sx += p.x;
+    sy += p.y;
+  }
+  const n = points.length;
+  return { x: sx / n, y: sy / n };
+}
+
+function mirrorQuadPoint(
+  p: { x: number; y: number },
+  mode: QuadMirrorMode,
+  W: number,
+  H: number
+): { x: number; y: number } {
+  switch (mode) {
+    case 'ox':
+      return { x: p.x, y: H - p.y };
+    case 'oy':
+      return { x: W - p.x, y: p.y };
+    case 'both':
+      return { x: W - p.x, y: H - p.y };
+    default:
+      return { ...p };
+  }
+}
+
+/**
+ * Tìm contour có tâm (centroid) gần nhất với vị trí đối xứng của centroid contour nguồn.
+ */
+function findOppositeContourId(
+  sourceId: number,
+  mode: QuadMirrorMode,
+  contours: Contour[],
+  W: number,
+  H: number,
+  excludeIds: Set<number>
+): number | null {
+  const source = contours.find((c) => c.id === sourceId);
+  if (!source || source.points.length < 1) return null;
+  const c0 = contourCentroidFromPoints(source.points);
+  const targetPt = mirrorQuadPoint(c0, mode, W, H);
+  let bestId: number | null = null;
+  let bestDist = Infinity;
+  const maxDist = Math.min(W, H) * 0.65;
+  const maxD2 = maxDist * maxDist;
+  for (const c of contours) {
+    if (c.id === sourceId || excludeIds.has(c.id)) continue;
+    if (c.points.length < 1) continue;
+    const cc = contourCentroidFromPoints(c.points);
+    const d2 = (cc.x - targetPt.x) ** 2 + (cc.y - targetPt.y) ** 2;
+    if (d2 < bestDist && d2 <= maxD2) {
+      bestDist = d2;
+      bestId = c.id;
+    }
+  }
+  return bestId;
+}
 
 const FillImage = () => {
   // Load state from localStorage on mount
@@ -92,7 +339,14 @@ const FillImage = () => {
   const [pointMoveMode, setPointMoveMode] = useState<'together' | 'symmetric'>('together'); // Cách di chuyển khi kéo nhiều điểm
   const [splineControlPointsByContour, setSplineControlPointsByContour] = useState<
     Record<number, Array<{ x: number; y: number }>>
-  >({}); // Lưu các điểm điều khiển ban đầu của spline để hiển thị
+  >({}); // Điểm điều khiển spline (kéo được sau khi vẽ)
+  /** Phần đỉnh còn lại của polygon sau cung spline (để tái dựng khi kéo điểm điều khiển) */
+  const [splineTailByContour, setSplineTailByContour] = useState<
+    Record<number, Array<{ x: number; y: number }>>
+  >({});
+  const [draggingSplineControl, setDraggingSplineControl] = useState<{ contourId: number; index: number } | null>(
+    null
+  );
   const [pointSelectMode, setPointSelectMode] = useState<boolean>(false); // Chế độ chọn điểm (quad mode)
   const [draggingEdgeIndex, setDraggingEdgeIndex] = useState<number | null>(null);
   const [pendingEdgeDragIndex, setPendingEdgeDragIndex] = useState<number | null>(null);
@@ -106,7 +360,46 @@ const FillImage = () => {
   const [simulateInputA, setSimulateInputA] = useState<string>('2');
   const [simulateInputB, setSimulateInputB] = useState<string>('2');
   const [simulateCroppedImage, setSimulateCroppedImage] = useState<string | null>(null); // Ảnh đã cắt bỏ border 5px
+  /** Màu thay thế vùng đen (vật liệu) trong mô phỏng */
+  const [simulateMaterialColor, setSimulateMaterialColor] = useState<string>('#8B4513');
+  /** Ảnh đã áp dụng tô màu vật liệu (sau crop) — dùng cho lưới */
+  const [simulatePaintedImage, setSimulatePaintedImage] = useState<string | null>(null);
+  /** Sau Apply Quad: hỏi có áp dụng đối xứng sang contour đối diện không */
+  const [mirrorApplyPrompt, setMirrorApplyPrompt] = useState<{
+    newImage: string;
+    sourceIds: number[];
+    quadSnapshot: Record<number, Array<{ x: number; y: number }>>;
+  } | null>(null);
+  /** Modal đối xứng: tick Ox / Oy / Both (tâm ảnh) */
+  const [mirrorTickOx, setMirrorTickOx] = useState(false);
+  const [mirrorTickOy, setMirrorTickOy] = useState(false);
+  const [mirrorTickBoth, setMirrorTickBoth] = useState(false);
+  /** Cắt & kéo giãn ảnh theo đường ngang/dọc */
+  const [cutStretchMode, setCutStretchMode] = useState(false);
+  const [cutStretchDraft, setCutStretchDraft] = useState<{
+    x1: number;
+    y1: number;
+    x2: number;
+    y2: number;
+  } | null>(null);
+  const cutStretchDragRef = useRef<{ start: { x: number; y: number }; current: { x: number; y: number } } | null>(
+    null
+  );
+  /** Khi đã chọn đường cắt, kéo trực tiếp để thay đổi vị trí `pos` */
+  const cutStretchMoveRef = useRef<{ kind: 'horizontal' | 'vertical' } | null>(null);
+  const [cutStretchCut, setCutStretchCut] = useState<
+    { kind: 'horizontal' | 'vertical'; pos: number } | null
+  >(null);
+  const [cutStretchInsertPx, setCutStretchInsertPx] = useState(40);
+  const [cutStretchFillMode, setCutStretchFillMode] = useState<'extrude' | 'solid'>('extrude');
+  const [cutStretchGapColor, setCutStretchGapColor] = useState('#3388ff');
   const BORDER_CROP_PX = 5;
+  /** Phóng to / thu nhỏ ảnh chính (canvas giữa) */
+  const CANVAS_ZOOM_MIN = 0.25;
+  const CANVAS_ZOOM_MAX = 4;
+  const clampCanvasZoom = (z: number) =>
+    Math.min(CANVAS_ZOOM_MAX, Math.max(CANVAS_ZOOM_MIN, z));
+  const [canvasZoom, setCanvasZoom] = useState(1);
 
   // Computed values based on history
   const selectedImage = history.length > 0 ? history[0] : null;
@@ -121,6 +414,33 @@ const FillImage = () => {
       .catch(() => setSimulateCroppedImage(currentImage || selectedImage));
   }, [simulateGrid, currentImage, selectedImage]);
 
+  // Sau crop: tô toàn bộ vùng đen bằng màu vật liệu (canvas)
+  useEffect(() => {
+    if (!simulateGrid || !(currentImage || selectedImage)) {
+      setSimulatePaintedImage(null);
+      return;
+    }
+    const base = simulateCroppedImage || currentImage || selectedImage;
+    if (!base) return;
+    let cancelled = false;
+    fillBlackWithMaterialColor(base, simulateMaterialColor, DEFAULT_SIMULATE_BLACK_THRESHOLD)
+      .then((url) => {
+        if (!cancelled) setSimulatePaintedImage(url);
+      })
+      .catch(() => {
+        if (!cancelled) setSimulatePaintedImage(base);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    simulateGrid,
+    simulateCroppedImage,
+    currentImage,
+    selectedImage,
+    simulateMaterialColor,
+  ]);
+
   // Save state to localStorage whenever it changes
   useEffect(() => {
     try {
@@ -133,6 +453,64 @@ const FillImage = () => {
       console.error('Error saving state:', error);
     }
   }, [history, historyIndex]);
+
+  // Khi xóa hết lịch sử: dọn state contour / zoom (đồng bộ với không còn ảnh)
+  useEffect(() => {
+    if (history.length > 0) return;
+    setCanvasZoom(1);
+    setContoursData(null);
+    setQuadMode(false);
+    setSelectedQuadContourIds([]);
+    setQuadPoints({});
+    setSplineControlPointsByContour({});
+    setSplineTailByContour({});
+    setImageDimensions(null);
+    setDisplayDimensions(null);
+    setActiveTool(null);
+    setCutStretchMode(false);
+    setCutStretchCut(null);
+    setCutStretchDraft(null);
+    cutStretchDragRef.current = null;
+    cutStretchMoveRef.current = null;
+    // Reset input file để lần chọn file tiếp theo luôn bắn `onChange`
+    if (fileInputRef.current) {
+      fileInputRef.current.value = '';
+    }
+    setLoading(false);
+  }, [history.length]);
+
+  // Mở lại modal đối xứng: reset tick
+  useEffect(() => {
+    if (mirrorApplyPrompt) {
+      setMirrorTickOx(false);
+      setMirrorTickOy(false);
+      setMirrorTickBoth(false);
+    }
+  }, [mirrorApplyPrompt]);
+
+  // Cập nhật kích thước hiển thị (SVG overlay) khi zoom / đổi ảnh
+  useEffect(() => {
+    const img = imgRef.current;
+    if (!img || !imageDimensions) return;
+    const r = img.getBoundingClientRect();
+    setDisplayDimensions({ width: r.width, height: r.height });
+  }, [canvasZoom, imageDimensions, currentImage, quadMode, contoursData, cutStretchMode]);
+
+  /** Xóa một bản khỏi lịch sử (nút × trên thumbnail) */
+  const removeHistoryAt = (index: number, e: React.MouseEvent) => {
+    e.stopPropagation();
+    e.preventDefault();
+    setHistory((prev) => {
+      const next = prev.filter((_, i) => i !== index);
+      setHistoryIndex((prevIdx) => {
+        if (next.length === 0) return -1;
+        if (prevIdx > index) return prevIdx - 1;
+        if (prevIdx === index) return Math.min(index, next.length - 1);
+        return prevIdx;
+      });
+      return next;
+    });
+  };
 
   const handleImageUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -166,11 +544,13 @@ const FillImage = () => {
           }
           
           // Lưu ảnh đã chuẩn hóa vào history (ảnh gốc luôn ở index 0)
+          setCanvasZoom(1);
           setHistory([data.img]);
           setHistoryIndex(0);
         } catch (error) {
           console.error('Error normalizing image:', error);
           // Nếu có lỗi, vẫn lưu ảnh gốc để có thể sử dụng
+        setCanvasZoom(1);
         setHistory([base64String]);
         setHistoryIndex(0);
           // Chỉ hiển thị cảnh báo, không block việc mở ảnh
@@ -194,6 +574,12 @@ const FillImage = () => {
       return;
     }
 
+    setCutStretchMode(false);
+    setCutStretchCut(null);
+    setCutStretchDraft(null);
+    cutStretchDragRef.current = null;
+    cutStretchMoveRef.current = null;
+
     // Nếu click vào tool khác khi đang có contours hoặc quad mode, clear
     if (contoursData || quadMode) {
       setContoursData(null);
@@ -201,8 +587,10 @@ const FillImage = () => {
       setQuadMode(false);
       setSelectedQuadContourIds([]);
       setQuadPoints({});
+      setSplineControlPointsByContour({});
+      setSplineTailByContour({});
     }
-
+    const workingImg = currentImage || selectedImage;
     setLoading(true);
     setActiveTool(tool);
     
@@ -213,7 +601,7 @@ const FillImage = () => {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          img: selectedImage,
+          img: workingImg,
           tool: tool,
         }),
       });
@@ -236,12 +624,219 @@ const FillImage = () => {
     }
   };
 
+  const handleExitCutStretch = () => {
+    setCutStretchMode(false);
+    setActiveTool(null);
+    setCutStretchCut(null);
+    setCutStretchDraft(null);
+    cutStretchDragRef.current = null;
+    cutStretchMoveRef.current = null;
+  };
+
+  const handleEnterCutStretch = () => {
+    if (!selectedImage) {
+      alert('Vui lòng chọn ảnh trước!');
+      return;
+    }
+    if (contoursData || quadMode) {
+      setContoursData(null);
+      setQuadMode(false);
+      setSelectedQuadContourIds([]);
+      setQuadPoints({});
+      setSelectedQuadEdgeIndices([]);
+      setSelectedQuadPoints([]);
+      setSplineControlPointsByContour({});
+      setSplineTailByContour({});
+      setSelectedContourIds([]);
+    }
+    setActiveTool('cut_stretch');
+    setCutStretchMode(true);
+    setCutStretchCut(null);
+    setCutStretchDraft(null);
+    cutStretchDragRef.current = null;
+    cutStretchMoveRef.current = null;
+  };
+
+  const getCutStretchSvgCoords = (
+    clientX: number,
+    clientY: number,
+    svgEl: SVGSVGElement
+  ): { x: number; y: number } | null => {
+    if (!imageDimensions) return null;
+    const rect = svgEl.getBoundingClientRect();
+    const x = ((clientX - rect.left) / rect.width) * imageDimensions.width;
+    const y = ((clientY - rect.top) / rect.height) * imageDimensions.height;
+    return {
+      x: Math.max(0, Math.min(imageDimensions.width, x)),
+      y: Math.max(0, Math.min(imageDimensions.height, y)),
+    };
+  };
+
+  const handleCutStretchMouseDown = (e: React.MouseEvent<SVGSVGElement>) => {
+    if (!imageDimensions || loading) return;
+    e.preventDefault();
+    const svg = e.currentTarget;
+    const p = getCutStretchSvgCoords(e.clientX, e.clientY, svg);
+    if (!p) return;
+    // Nếu đã có đường cắt: bấm gần đường thì kéo để di chuyển vị trí
+    if (cutStretchCut) {
+      const lineDist = cutStretchCut.kind === 'horizontal' ? Math.abs(p.y - cutStretchCut.pos) : Math.abs(p.x - cutStretchCut.pos);
+      const lineStrokeW =
+        cutStretchCut.kind === 'horizontal' ? Math.max(2, imageDimensions.width / 400) : Math.max(2, imageDimensions.height / 400);
+      const hitRadius = lineStrokeW + 6; // Cho phép bấm hơi lệch để dễ kéo
+
+      if (lineDist <= hitRadius) {
+        const dims = imageDimensions;
+        const movingKind = cutStretchCut.kind;
+        cutStretchMoveRef.current = { kind: movingKind };
+        setCutStretchDraft(null);
+        cutStretchDragRef.current = null;
+
+        const onMove = (ev: MouseEvent) => {
+          if (!cutStretchMoveRef.current) return;
+          const cur = getCutStretchSvgCoords(ev.clientX, ev.clientY, svg);
+          if (!cur) return;
+
+          if (movingKind === 'horizontal') {
+            const clampedY = Math.max(1, Math.min(dims.height - 1, Math.round(cur.y)));
+            setCutStretchCut((prev) => (prev ? { ...prev, pos: clampedY } : prev));
+          } else {
+            const clampedX = Math.max(1, Math.min(dims.width - 1, Math.round(cur.x)));
+            setCutStretchCut((prev) => (prev ? { ...prev, pos: clampedX } : prev));
+          }
+        };
+
+        const onUp = () => {
+          window.removeEventListener('mousemove', onMove);
+          window.removeEventListener('mouseup', onUp);
+          cutStretchMoveRef.current = null;
+        };
+
+        window.addEventListener('mousemove', onMove);
+        window.addEventListener('mouseup', onUp);
+        return;
+      }
+    }
+
+    // Nếu không bấm gần đường cắt: bắt đầu vẽ lại (draft) để xác định đường cắt mới
+    setCutStretchCut(null);
+    cutStretchDragRef.current = { start: p, current: p };
+    setCutStretchDraft({ x1: p.x, y1: p.y, x2: p.x, y2: p.y });
+
+    const dims = imageDimensions;
+    const onMove = (ev: MouseEvent) => {
+      const cur = getCutStretchSvgCoords(ev.clientX, ev.clientY, svg);
+      if (!cur || !cutStretchDragRef.current) return;
+      cutStretchDragRef.current.current = cur;
+      setCutStretchDraft({
+        x1: cutStretchDragRef.current.start.x,
+        y1: cutStretchDragRef.current.start.y,
+        x2: cur.x,
+        y2: cur.y,
+      });
+    };
+
+    const onUp = () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+      const drag = cutStretchDragRef.current;
+      cutStretchDragRef.current = null;
+      setCutStretchDraft(null);
+      if (!drag) return;
+      const { start, current } = drag;
+      const dx = Math.abs(current.x - start.x);
+      const dy = Math.abs(current.y - start.y);
+      if (dx < 4 && dy < 4) return;
+      if (dx >= dy) {
+        const yy = Math.round((start.y + current.y) / 2);
+        const clampedY = Math.max(1, Math.min(dims.height - 1, yy));
+        setCutStretchCut({ kind: 'horizontal', pos: clampedY });
+      } else {
+        const xx = Math.round((start.x + current.x) / 2);
+        const clampedX = Math.max(1, Math.min(dims.width - 1, xx));
+        setCutStretchCut({ kind: 'vertical', pos: clampedX });
+      }
+    };
+
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+  };
+
+  const handleApplyCutStretch = () => {
+    if (!cutStretchCut || !imageDimensions) {
+      alert('Kéo một đường trên ảnh: gần ngang → cắt theo hàng; gần dọc → cắt theo cột.');
+      return;
+    }
+    const src = currentImage || selectedImage;
+    if (!src) return;
+    const { r, g, b } = hexToRgb(cutStretchGapColor);
+    const rgb: [number, number, number] = [r, g, b];
+    setLoading(true);
+    const img = new Image();
+    img.onload = () => {
+      try {
+        const canvas = document.createElement('canvas');
+        canvas.width = img.width;
+        canvas.height = img.height;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) {
+          setLoading(false);
+          return;
+        }
+        ctx.drawImage(img, 0, 0);
+        const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        const out =
+          cutStretchCut.kind === 'horizontal'
+            ? applyHorizontalCutStretch(
+                imageData,
+                cutStretchCut.pos,
+                cutStretchInsertPx,
+                cutStretchFillMode,
+                rgb
+              )
+            : applyVerticalCutStretch(
+                imageData,
+                cutStretchCut.pos,
+                cutStretchInsertPx,
+                cutStretchFillMode,
+                rgb
+              );
+        canvas.width = out.width;
+        canvas.height = out.height;
+        ctx.putImageData(out, 0, 0);
+        const newUrl = canvas.toDataURL('image/png');
+        const newHistory = history.slice(0, historyIndex + 1);
+        newHistory.push(newUrl);
+        setHistory(newHistory);
+        setHistoryIndex(newHistory.length - 1);
+        setImageDimensions({ width: out.width, height: out.height });
+        setCutStretchCut(null);
+        setCutStretchDraft(null);
+      } catch (e) {
+        console.error(e);
+        alert('Lỗi khi áp dụng cắt & kéo giãn.');
+      } finally {
+        setLoading(false);
+      }
+    };
+    img.onerror = () => {
+      setLoading(false);
+      alert('Không đọc được ảnh.');
+    };
+    img.src = src;
+  };
+
   // Get contours - giống như một tool bình thường (fill contour mode)
   const handleGetContours = async () => {
     if (!selectedImage) {
       alert('Vui lòng chọn ảnh trước!');
       return;
     }
+
+    setCutStretchMode(false);
+    setCutStretchCut(null);
+    setCutStretchDraft(null);
+    cutStretchDragRef.current = null;
 
     // Thoát quad mode nếu đang bật, để vào fill contour mode thuần
     if (quadMode) {
@@ -251,6 +846,7 @@ const FillImage = () => {
       setSelectedQuadEdgeIndices([]);
       setSelectedQuadPoints([]);
       setSplineControlPointsByContour({});
+      setSplineTailByContour({});
     }
 
     const workingImg = processedImage || selectedImage;
@@ -312,11 +908,23 @@ const FillImage = () => {
   };
 
   // Lấy contour tại tọa độ màn hình (clientX, clientY) trên SVG – trả về contour nhỏ nhất chứa điểm
-  const getContourAtPoint = (clientX: number, clientY: number, svgEl: SVGSVGElement | null): Contour | null => {
-    if (!contoursData || !imageDimensions || !displayDimensions || !svgEl) return null;
-    const rect = svgEl.getBoundingClientRect();
-    const x = ((clientX - rect.left) / rect.width) * imageDimensions.width;
-    const y = ((clientY - rect.top) / rect.height) * imageDimensions.height;
+  const getContourAtPoint = (clientX: number, clientY: number): Contour | null => {
+    if (!contoursData || !imageDimensions) return null;
+    const imgEl = imgRef.current;
+    if (!imgEl) return null;
+
+    // SVG overlay có thể lớn hơn ảnh thật (ảnh được căn giữa + giới hạn maxHeight/maxWidth),
+    // vì vậy cần quy đổi tọa độ chuột theo bounding box của ảnh.
+    const imgRect = imgEl.getBoundingClientRect();
+    if (imgRect.width <= 0 || imgRect.height <= 0) return null;
+
+    const nx = (clientX - imgRect.left) / imgRect.width;
+    const ny = (clientY - imgRect.top) / imgRect.height;
+    if (nx < 0 || nx > 1 || ny < 0 || ny > 1) return null;
+
+    const x = nx * imageDimensions.width;
+    const y = ny * imageDimensions.height;
+
     const containing = contoursData.contours.filter((c) => pointInPolygon(x, y, c.points));
     if (containing.length === 0) return null;
     containing.sort((a, b) => a.area - b.area);
@@ -327,14 +935,14 @@ const FillImage = () => {
     if (!contoursData) return;
     // Trong quad transform mode: không chọn contour bằng click trên hình
     if (quadMode) return;
-    const contour = getContourAtPoint(e.clientX, e.clientY, e.currentTarget);
+    const contour = getContourAtPoint(e.clientX, e.clientY);
     if (!contour) return;
     handleToggleContour(contour.id);
   };
 
   const handleContourCanvasMouseMove = (e: React.MouseEvent<SVGSVGElement>) => {
     if (!contoursData) return;
-    const contour = getContourAtPoint(e.clientX, e.clientY, e.currentTarget);
+    const contour = getContourAtPoint(e.clientX, e.clientY);
     if (quadMode) setHoveredQuadContourId(contour?.id ?? null);
     else setHoveredContourId(contour?.id ?? null);
   };
@@ -435,6 +1043,7 @@ const FillImage = () => {
     setSelectedQuadEdgeIndices([]);
     setSelectedQuadPoints([]);
     setSplineControlPointsByContour({});
+    setSplineTailByContour({});
   };
 
   // Exit quad transform mode – tách riêng, về panel Tools (không qua fill contour)
@@ -447,6 +1056,8 @@ const FillImage = () => {
     setSelectedQuadEdgeIndices([]);
     setSelectedQuadPoints([]);
     setSplineControlPointsByContour({});
+    setSplineTailByContour({});
+    setDraggingSplineControl(null);
     setPointMoveMode('together');
     setDraggingPointIndex(null);
     setDraggingContourId(null);
@@ -570,41 +1181,95 @@ const FillImage = () => {
     return out;
   };
 
+  /** Cung đi theo chiều kim đồng hồ trên polygon: từ start đến end (gồm cả hai đầu) */
+  const forwardArcInclusive = (start: number, end: number, n: number): number[] => {
+    const path: number[] = [];
+    let i = start;
+    for (let k = 0; k <= n; k++) {
+      path.push(i);
+      if (i === end) break;
+      i = (i + 1) % n;
+    }
+    return path;
+  };
+
+  /** Các đỉnh còn lại sau cung start→end (không gồm đỉnh nội suy của cung) */
+  const verticesAfterArc = (arcEnd: number, arcStart: number, n: number): number[] => {
+    const rest: number[] = [];
+    let i = (arcEnd + 1) % n;
+    while (i !== arcStart) {
+      rest.push(i);
+      i = (i + 1) % n;
+    }
+    return rest;
+  };
+
   const handleSplineClick = () => {
     const contourId = selectedQuadContourIds[0];
     if (contourId === undefined || !quadPoints[contourId]) return;
-    const indicesForContour = selectedQuadPoints
-      .filter((s) => s.contourId === contourId)
-      .map((s) => s.pointIndex);
-    const sorted = [...new Set(indicesForContour)].sort((a, b) => a - b);
-    if (sorted.length < 3) {
+    // Giữ thứ tự chọn (điểm giữa = đỉnh spline mong muốn)
+    const orderedIndices: number[] = [];
+    for (const s of selectedQuadPoints) {
+      if (s.contourId === contourId && !orderedIndices.includes(s.pointIndex)) {
+        orderedIndices.push(s.pointIndex);
+      }
+    }
+    if (orderedIndices.length < 3) {
       alert('Chọn ít nhất 3 điểm để vẽ spline.');
       return;
     }
     const allPts = quadPoints[contourId];
-    const pts = sorted.map((i) => allPts[i]);
+    const n = allPts.length;
+    const pts = orderedIndices.map((i) => allPts[i]);
 
-    // Lưu lại các điểm điều khiển ban đầu để hiển thị sau khi spline đã thay thế đoạn thẳng
-    setSplineControlPointsByContour(prev => ({
+    const i0 = orderedIndices[0];
+    const i1 = orderedIndices[Math.floor(orderedIndices.length / 2)];
+    const iLast = orderedIndices[orderedIndices.length - 1];
+
+    // Catmull-Rom: đường cong đi qua tất cả các điểm theo thứ tự đã chọn (nội suy, không chỉ kéo hướng)
+    const sampled = sampleSplinePoints(pts, pts.length <= 4 ? 16 : 12);
+
+    // Tìm cung polygon từ i0 → iLast có chứa điểm giữa (và với n>3, mọi điểm đã chọn nằm trên cung)
+    const arcA = forwardArcInclusive(i0, iLast, n);
+    const arcB = forwardArcInclusive(iLast, i0, n);
+    let arc: number[] | null = null;
+    if (arcA.includes(i1) && arcA.length >= 2) {
+      const ok =
+        orderedIndices.length === 3 ||
+        orderedIndices.every((idx) => arcA.includes(idx));
+      if (ok) arc = arcA;
+    }
+    if (!arc && arcB.includes(i1) && arcB.length >= 2) {
+      const ok =
+        orderedIndices.length === 3 ||
+        orderedIndices.every((idx) => arcB.includes(idx));
+      if (ok) arc = arcB;
+    }
+    if (!arc) {
+      alert(
+        'Các điểm đã chọn không nằm liên tiếp trên viền contour. Hãy chọn các điểm theo một cạnh liên tục.'
+      );
+      return;
+    }
+
+    const arcStart = arc[0];
+    const arcEnd = arc[arc.length - 1];
+
+    const currentPts = allPts; // cùng tham chiếu với quadPoints[contourId] tại thời điểm click
+    const restIdx = verticesAfterArc(arcEnd, arcStart, n);
+    const tail = restIdx.map((j) => ({ ...currentPts[j] }));
+    const newPoints = [...sampled, ...tail];
+
+    // Chỉ gán sau khi validation OK — tránh UI chuyển sang spline nhưng không có tail/đa giác mới (kéo điểm bị hỏng)
+    setSplineControlPointsByContour((prev) => ({
       ...prev,
       [contourId]: pts,
     }));
-
-    // Thay thế đoạn thẳng giữa điểm đầu và cuối bằng đa giác bám theo spline
-    const startIdx = sorted[0];
-    const endIdx = sorted[sorted.length - 1];
-    const sampled = sampleSplinePoints(pts, 12); // càng nhiều mẫu thì càng mượt
-
-    setQuadPoints(prev => {
-      const current = prev[contourId] || [];
-      const before = current.slice(0, startIdx);
-      const after = current.slice(endIdx + 1);
-      const newPoints = [...before, ...sampled, ...after];
-      return {
-        ...prev,
-        [contourId]: newPoints,
-      };
-    });
+    setQuadPoints((prev) => ({
+      ...prev,
+      [contourId]: newPoints,
+    }));
+    setSplineTailByContour((prevTail) => ({ ...prevTail, [contourId]: tail }));
 
     setSelectedQuadPoints([]);
     setSelectedQuadEdgeIndices([]);
@@ -617,6 +1282,11 @@ const FillImage = () => {
       alert('Vui lòng chọn ảnh trước!');
       return;
     }
+
+    setCutStretchMode(false);
+    setCutStretchCut(null);
+    setCutStretchDraft(null);
+    cutStretchDragRef.current = null;
 
     // Xóa trạng thái fill contour nếu có, để vào quad mode thuần
     setSelectedContourIds([]);
@@ -673,6 +1343,8 @@ const FillImage = () => {
         img.src = data.originalImg;
       }
       
+      setSplineControlPointsByContour({});
+      setSplineTailByContour({});
       setQuadPoints(quadPointsMap);
       setQuadMode(true);
       const firstContourId = data.contours?.[0]?.id;
@@ -685,10 +1357,85 @@ const FillImage = () => {
     }
   };
 
-  // Apply perspective transform - fill tất cả các polygon
+  /** Reset 4 điểm tứ giác về hình chữ nhật bao nhỏ nhất (minAreaRect) quanh contour — theo contour đã chọn */
+  const handleResetQuadToMinRect = async () => {
+    if (!contoursData || selectedQuadContourIds.length === 0) {
+      alert('Chọn ít nhất một contour trong danh sách để reset tứ giác.');
+      return;
+    }
+
+    setLoading(true);
+    try {
+      const updates: { [contourId: number]: Array<{ x: number; y: number }> } = {};
+
+      for (const cid of selectedQuadContourIds) {
+        const contour = contoursData.contours.find((c) => c.id === cid);
+        if (!contour || contour.points.length < 3) continue;
+
+        const response = await fetch(`${API_URL}/min_area_quad_from_points`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            points: contour.points.map((p) => ({
+              x: Math.round(p.x),
+              y: Math.round(p.y),
+            })),
+          }),
+        });
+
+        if (!response.ok) {
+          const errText = await response.text();
+          throw new Error(errText || `Lỗi reset contour ${cid + 1}`);
+        }
+
+        const data = (await response.json()) as { quad: Array<{ x: number; y: number }> };
+        updates[cid] = data.quad.map((p) => ({ x: p.x, y: p.y }));
+      }
+
+      if (Object.keys(updates).length === 0) {
+        alert('Không có contour hợp lệ (cần ít nhất 3 đỉnh trên contour).');
+        return;
+      }
+
+      setQuadPoints((prev) => ({ ...prev, ...updates }));
+
+      setSplineControlPointsByContour((prev) => {
+        const next = { ...prev };
+        for (const cid of Object.keys(updates)) {
+          delete next[Number(cid)];
+        }
+        return next;
+      });
+      setSplineTailByContour((prev) => {
+        const next = { ...prev };
+        for (const cid of Object.keys(updates)) {
+          delete next[Number(cid)];
+        }
+        return next;
+      });
+      setSelectedQuadPoints([]);
+      setSelectedQuadEdgeIndices([]);
+    } catch (error) {
+      console.error('Reset quad:', error);
+      alert(
+        error instanceof Error
+          ? error.message
+          : 'Không reset được tứ giác. Kiểm tra backend và thử lại.'
+      );
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Apply perspective transform — chỉ các contour đang chọn trong danh sách Quad Transform
   const handleApplyTransform = async () => {
     if (!contoursData || Object.keys(quadPoints).length === 0) {
       alert('Vui lòng có ít nhất một contour với quad points!');
+      return;
+    }
+
+    if (selectedQuadContourIds.length === 0) {
+      alert('Vui lòng chọn ít nhất một contour trong danh sách (Quad Transform) để áp dụng!');
       return;
     }
 
@@ -703,10 +1450,18 @@ const FillImage = () => {
       // Sử dụng ảnh hiện tại đang được hiển thị (currentImage)
       const workingImg = currentImage || selectedImage;
       
-      // Chuyển đổi tất cả quad points sang format cho backend
+      // Chỉ gửi quad points của các contour đã chọn (checkbox trong sidebar)
       const allQuadPoints: { [key: string]: Array<{ x: number; y: number }> } = {};
-      for (const [contourId, points] of Object.entries(quadPoints)) {
-        allQuadPoints[contourId.toString()] = points;
+      for (const contourId of selectedQuadContourIds) {
+        const points = quadPoints[contourId];
+        if (points && points.length >= 3) {
+          allQuadPoints[String(contourId)] = points;
+        }
+      }
+      if (Object.keys(allQuadPoints).length === 0) {
+        alert('Các contour đã chọn chưa có đủ quad points (ít nhất 3 điểm). Hãy chỉnh hoặc tải lại điểm.');
+        setLoading(false);
+        return;
       }
       
       const response = await fetch(`${API_URL}/perspective_transform`, {
@@ -739,12 +1494,146 @@ const FillImage = () => {
         originalImg: data.img,
         previewImg: data.img,
       } : prev);
+
+      // Hỏi đối xứng sang contour đối diện (cần kích thước ảnh + ≥2 contour)
+      if (
+        imageDimensions &&
+        contoursData.contours.length >= 2 &&
+        selectedQuadContourIds.length > 0
+      ) {
+        const quadSnapshot: Record<number, Array<{ x: number; y: number }>> = {};
+        for (const cid of selectedQuadContourIds) {
+          const q = quadPoints[cid];
+          if (q && q.length >= 3) {
+            quadSnapshot[cid] = q.map((p) => ({ x: p.x, y: p.y }));
+          }
+        }
+        if (Object.keys(quadSnapshot).length > 0) {
+          setMirrorApplyPrompt({
+            newImage: data.img,
+            sourceIds: [...selectedQuadContourIds],
+            quadSnapshot,
+          });
+        }
+      }
     } catch (error) {
       console.error('Error:', error);
       alert('Có lỗi xảy ra khi transform ảnh!');
     } finally {
       setLoading(false);
     }
+  };
+
+  /** Apply lần 2: tứ giác đối xứng cho contour “đối diện”, trên ảnh vừa Apply xong (có thể nhiều trục trong một lần) */
+  const handleMirrorApplyFollowUp = async (modes: QuadMirrorMode[]) => {
+    if (!mirrorApplyPrompt || !contoursData || !imageDimensions) {
+      setMirrorApplyPrompt(null);
+      return;
+    }
+    if (modes.length === 0) return;
+
+    const { newImage, sourceIds, quadSnapshot } = mirrorApplyPrompt;
+    const W = imageDimensions.width;
+    const H = imageDimensions.height;
+    const contours = contoursData.contours;
+
+    const allQuadPoints: { [key: string]: Array<{ x: number; y: number }> } = {};
+    const assignedTargets = new Set<number>();
+
+    for (const mode of modes) {
+      for (const cid of sourceIds) {
+        const pts = quadSnapshot[cid];
+        if (!pts || pts.length < 3) continue;
+        const exclude = new Set<number>([...sourceIds, ...assignedTargets]);
+        const targetId = findOppositeContourId(cid, mode, contours, W, H, exclude);
+        if (targetId === null) continue;
+        const mirrored = pts.map((p) => mirrorQuadPoint(p, mode, W, H));
+        allQuadPoints[String(targetId)] = mirrored;
+        assignedTargets.add(targetId);
+      }
+    }
+
+    setMirrorApplyPrompt(null);
+
+    if (Object.keys(allQuadPoints).length === 0) {
+      alert(
+        'Không tìm thấy contour đối diện phù hợp (centroid sau đối xứng phải gần centroid một contour khác trong khoảng cho phép).'
+      );
+      return;
+    }
+
+    setLoading(true);
+    try {
+      const response = await fetch(`${API_URL}/perspective_transform`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          img: newImage,
+          contours: contoursData.contours,
+          allQuadPoints: allQuadPoints,
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error('Lỗi khi transform ảnh (đối xứng)');
+      }
+
+      const data = await response.json();
+
+      // Nối tiếp ảnh vừa Apply (không cắt nhánh undo — modal mở ngay sau bước trước)
+      setHistory((prev) => [...prev, data.img]);
+      setHistoryIndex((prev) => prev + 1);
+
+      setContoursData((prev) =>
+        prev
+          ? {
+              ...prev,
+              originalImg: data.img,
+              previewImg: data.img,
+            }
+          : prev
+      );
+
+      setQuadPoints((prev) => {
+        const next = { ...prev };
+        for (const [key, pts] of Object.entries(allQuadPoints)) {
+          next[Number(key)] = pts.map((p) => ({ x: p.x, y: p.y }));
+        }
+        return next;
+      });
+
+      setSplineControlPointsByContour((prev) => {
+        const next = { ...prev };
+        for (const key of Object.keys(allQuadPoints)) {
+          delete next[Number(key)];
+        }
+        return next;
+      });
+      setSplineTailByContour((prev) => {
+        const next = { ...prev };
+        for (const key of Object.keys(allQuadPoints)) {
+          delete next[Number(key)];
+        }
+        return next;
+      });
+    } catch (error) {
+      console.error('Mirror apply:', error);
+      alert('Có lỗi khi áp dụng chỉnh sửa đối xứng!');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  /** Xác nhận đối xứng từ checkbox Ox / Oy / Both (độc lập; tick cả 3 = áp dụng Ox, Oy và tâm ảnh) */
+  const handleMirrorApplyConfirm = () => {
+    const modes: QuadMirrorMode[] = [];
+    if (mirrorTickOx) modes.push('ox');
+    if (mirrorTickOy) modes.push('oy');
+    if (mirrorTickBoth) modes.push('both');
+    if (modes.length === 0) return;
+    void handleMirrorApplyFollowUp(modes);
   };
 
   // Handle mouse events for dragging points (hoặc chọn điểm khi pointSelectMode)
@@ -755,8 +1644,24 @@ const FillImage = () => {
       toggleQuadPointSelection(pointIndex, contourId);
       return;
     }
+    setDraggingSplineControl(null);
     setDraggingPointIndex(pointIndex);
     setDraggingContourId(contourId);
+  };
+
+  /** Kéo điểm điều khiển spline sau khi đã vẽ spline */
+  const handleSplineControlMouseDown = (
+    e: React.MouseEvent<SVGCircleElement>,
+    contourId: number,
+    controlIndex: number
+  ) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (pointSelectMode) return;
+    setDraggingSplineControl({ contourId, index: controlIndex });
+    setDraggingPointIndex(null);
+    setDraggingContourId(null);
+    pointDragLastCoordsRef.current = null;
   };
 
   const getImageCoords = (e: React.MouseEvent<SVGSVGElement>) => {
@@ -774,6 +1679,35 @@ const FillImage = () => {
     if (!imageDimensions || !displayDimensions) return;
     const coords = getImageCoords(e);
     if (!coords) return;
+
+    // Kéo điểm điều khiển spline: tái tạo đa giác từ control + phần đuôi đã lưu
+    if (draggingSplineControl !== null) {
+      const { contourId, index } = draggingSplineControl;
+      // tail có thể là [] khi spline thay thế cả contour — vẫn cho phép kéo
+      const tail = splineTailByContour[contourId] ?? [];
+      if (!pointDragLastCoordsRef.current) {
+        pointDragLastCoordsRef.current = coords;
+        return;
+      }
+      const dx = coords.x - pointDragLastCoordsRef.current.x;
+      const dy = coords.y - pointDragLastCoordsRef.current.y;
+      if (dx === 0 && dy === 0) return;
+      const w = imageDimensions.width;
+      const h = imageDimensions.height;
+      const clamp = (v: number, max: number) => Math.max(0, Math.min(v, max));
+
+      setSplineControlPointsByContour((prev) => {
+        const ctrl = [...(prev[contourId] || [])];
+        const p = ctrl[index];
+        if (!p) return prev;
+        ctrl[index] = { x: clamp(p.x + dx, w), y: clamp(p.y + dy, h) };
+        const sampled = sampleSplinePoints(ctrl, ctrl.length <= 4 ? 16 : 12);
+        setQuadPoints((q) => ({ ...q, [contourId]: [...sampled, ...tail] }));
+        return { ...prev, [contourId]: ctrl };
+      });
+      pointDragLastCoordsRef.current = coords;
+      return;
+    }
 
     // Kéo điểm: áp dụng delta cho tất cả contour đã chọn (chỉnh 1 lúc)
     if (draggingPointIndex !== null && draggingContourId !== null && selectedQuadContourIds.length > 0) {
@@ -877,6 +1811,7 @@ const FillImage = () => {
       setPendingEdgeDragIndex(null);
       edgeDragStartRef.current = null;
     }
+    setDraggingSplineControl(null);
     setDraggingPointIndex(null);
     setDraggingContourId(null);
     pointDragLastCoordsRef.current = null;
@@ -928,11 +1863,16 @@ const FillImage = () => {
   // Xóa ảnh
   const handleClearImage = () => {
     setActiveTool(null);
+    setCanvasZoom(1);
     setHistory([]);
     setHistoryIndex(-1);
+    setLoading(false);
+    if (fileInputRef.current) fileInputRef.current.value = '';
     setContoursData(null);
     setHoveredContourId(null);
     setSelectedContourIds([]);
+    setSplineTailByContour({});
+    setDraggingSplineControl(null);
     // Xóa luôn localStorage
     localStorage.removeItem(STORAGE_KEY);
   };
@@ -957,6 +1897,7 @@ const FillImage = () => {
   const handleCloseSimulate = () => {
     setSimulateGrid(null);
     setSimulateCroppedImage(null);
+    setSimulatePaintedImage(null);
   };
 
   // Cắt bỏ border đen 5px ở mỗi cạnh trước khi mô phỏng (tránh khe hở giữa các ô)
@@ -1018,6 +1959,13 @@ const FillImage = () => {
     { id: 'fill_max', name: 'Fill Max', icon: '⬆️', description: 'Đối xứng ảnh (max)' },
     { id: 'get_contours', name: 'Fill Contours', icon: '🎯', description: 'Click để fill contours', isSpecial: true },
     { id: 'quad_transform', name: 'Quad Transform', icon: '⬜', description: 'Kéo thả đỉnh tứ giác', isSpecial: true },
+    {
+      id: 'cut_stretch',
+      name: 'Cắt & kéo giãn',
+      icon: '✂️',
+      description: 'Vạch đường cắt rồi chèn khoảng (extrude / màu)',
+      isSpecial: true,
+    },
   ];
 
   return (
@@ -1104,7 +2052,39 @@ const FillImage = () => {
             onClick={(e) => e.stopPropagation()}
           >
             <h3 className="text-lg font-semibold mb-4 text-white">Mô phỏng vật liệu a × b</h3>
-            <p className="text-sm text-[#aaa] mb-4">Nhập số lượng ảnh theo 2 chiều (1–20)</p>
+            <p className="text-sm text-[#aaa] mb-4">Nhập số lượng ảnh theo 2 chiều (1–20). Vùng đen trên ảnh sẽ được tô bằng màu vật liệu bạn chọn.</p>
+            <div className="mb-5 rounded-lg border border-[#3a3a3a] bg-[#1e1e1e] p-3">
+              <label className="mb-2 block text-xs font-medium text-[#ccc]">🎨 Màu vật liệu (tô vùng đen)</label>
+              <div className="flex flex-wrap items-center gap-3">
+                <input
+                  type="color"
+                  value={simulateMaterialColor}
+                  onChange={(e) => setSimulateMaterialColor(e.target.value)}
+                  className="h-10 w-14 cursor-pointer rounded border border-[#555] bg-transparent p-0"
+                  title="Chọn màu"
+                />
+                <span className="font-mono text-xs text-[#aaa]">{simulateMaterialColor}</span>
+              </div>
+              <div className="mt-2 flex flex-wrap gap-1.5">
+                {[
+                  { label: 'Gạch', hex: '#A52A2A' },
+                  { label: 'Xi măng', hex: '#B8B8B8' },
+                  { label: 'Đá', hex: '#708090' },
+                  { label: 'Gỗ', hex: '#8B4513' },
+                  { label: 'Ngói', hex: '#B22222' },
+                  { label: 'Đen gốc', hex: '#1a1a1a' },
+                ].map((p) => (
+                  <button
+                    key={p.hex}
+                    type="button"
+                    onClick={() => setSimulateMaterialColor(p.hex)}
+                    className="rounded border border-[#444] px-2 py-0.5 text-[10px] text-[#ccc] hover:bg-[#3a3a3a]"
+                  >
+                    {p.label}
+                  </button>
+                ))}
+              </div>
+            </div>
             <div className="flex gap-4 mb-5">
               <div>
                 <label className="block text-xs text-[#aaa] mb-1">Số cột (a)</label>
@@ -1147,8 +2127,165 @@ const FillImage = () => {
         </div>
       )}
 
+      {/* Modal: sau Apply Quad — hỏi đối xứng sang contour đối diện */}
+      {mirrorApplyPrompt && (
+        <div
+          className="fixed inset-0 z-[55] flex items-center justify-center bg-black/75 p-4"
+          onClick={() => !loading && setMirrorApplyPrompt(null)}
+        >
+          <div
+            className="max-w-md rounded-lg border border-[#3a3a3a] bg-[#2a2a2a] p-6 shadow-xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h3 className="mb-2 text-lg font-semibold text-white">
+              Áp dụng tương tự cho contour đối xứng?
+            </h3>
+            <p className="mb-3 text-sm leading-relaxed text-[#aaa]">
+              Mỗi điểm tứ giác đã chỉnh sẽ được đối xứng theo trục bạn chọn, rồi gán cho contour có{' '}
+              <strong className="text-cyan-300">tâm (centroid)</strong> gần nhất với vị trí đối xứng đó.
+            </p>
+            <ul className="mb-3 list-inside list-disc text-xs text-[#888]">
+              <li>
+                <strong className="text-[#ccc]">Ox</strong> (trục ngang): lật trên-dưới —{' '}
+                <code className="text-[#aaa]">y&apos; = H − y</code>
+              </li>
+              <li>
+                <strong className="text-[#ccc]">Oy</strong> (trục dọc): lật trái-phải —{' '}
+                <code className="text-[#aaa]">x&apos; = W − x</code>
+              </li>
+              <li>
+                <strong className="text-[#ccc]">Both</strong> (tâm ảnh): đối xứng qua tâm —{' '}
+                <code className="text-[#aaa]">(x&apos;, y&apos;) = (W − x, H − y)</code>
+                {' '}
+                <span className="text-[#666]">(khác với tick riêng Ox và Oy)</span>
+              </li>
+            </ul>
+            <div className="mb-4 space-y-3 rounded-lg border border-[#3a3a3a] bg-[#1e1e1e] p-3">
+              <span className="mb-1 block text-xs font-medium text-[#ccc]">Chọn trục đối xứng:</span>
+              <label className="flex cursor-pointer items-center gap-3 text-sm text-white hover:text-cyan-200">
+                <input
+                  type="checkbox"
+                  checked={mirrorTickOx}
+                  onChange={(e) => setMirrorTickOx(e.target.checked)}
+                  disabled={loading}
+                  className="h-4 w-4 rounded border-[#555] bg-[#2a2a2a] accent-cyan-500"
+                />
+                <span>
+                  Đối xứng qua <strong>Ox</strong> (trục ngang)
+                </span>
+              </label>
+              <label className="flex cursor-pointer items-center gap-3 text-sm text-white hover:text-cyan-200">
+                <input
+                  type="checkbox"
+                  checked={mirrorTickOy}
+                  onChange={(e) => setMirrorTickOy(e.target.checked)}
+                  disabled={loading}
+                  className="h-4 w-4 rounded border-[#555] bg-[#2a2a2a] accent-cyan-500"
+                />
+                <span>
+                  Đối xứng qua <strong>Oy</strong> (trục dọc)
+                </span>
+              </label>
+              <label className="flex cursor-pointer items-start gap-3 text-sm text-white hover:text-amber-200/90">
+                <input
+                  type="checkbox"
+                  checked={mirrorTickBoth}
+                  onChange={(e) => setMirrorTickBoth(e.target.checked)}
+                  disabled={loading}
+                  className="mt-0.5 h-4 w-4 shrink-0 rounded border-[#555] bg-[#2a2a2a] accent-amber-500"
+                />
+                <span>
+                  <strong className="text-amber-200/95">Both</strong> — đối xứng qua <strong>Ox và Oy</strong> (tâm ảnh){' '}
+                  <code className="block text-xs text-[#888] mt-1">(x&apos;, y&apos;) = (W − x, H − y)</code>
+                </span>
+              </label>
+            </div>
+            <div className="flex flex-col gap-2 sm:flex-row sm:justify-end">
+              <button
+                type="button"
+                disabled={loading}
+                onClick={() => setMirrorApplyPrompt(null)}
+                className="order-2 rounded border border-[#555] px-4 py-2 text-sm text-[#ccc] hover:bg-[#3a3a3a] disabled:opacity-50 sm:order-1"
+              >
+                Không
+              </button>
+              <button
+                type="button"
+                disabled={loading || (!mirrorTickOx && !mirrorTickOy && !mirrorTickBoth)}
+                onClick={() => void handleMirrorApplyConfirm()}
+                className="order-1 rounded bg-cyan-700 px-4 py-2 text-sm font-medium text-white hover:bg-cyan-600 disabled:cursor-not-allowed disabled:opacity-50 sm:order-2"
+              >
+                Áp dụng
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Main Content Area */}
       <div className="flex flex-1 overflow-hidden min-h-0">
+        {/* Lịch sử ảnh — click để xem lại bản đã lưu (cùng stack với Undo/Redo) */}
+        {history.length > 0 && (
+          <aside
+            className="w-[168px] min-w-[168px] shrink-0 flex flex-col min-h-0 bg-[#1e1e1e] border-r border-[#3a3a3a]"
+            aria-label="Lịch sử chỉnh sửa"
+          >
+            <div className="px-2 py-2 border-b border-[#3a3a3a] text-[11px] font-semibold text-[#aaa]">
+              📜 Lịch sử
+              <span className="block text-[10px] font-normal text-[#666] mt-0.5">
+                {history.length} bản · đang xem:{' '}
+                {historyIndex === 0 ? 'gốc' : `#${historyIndex}`}
+              </span>
+            </div>
+            <div className="flex-1 overflow-y-auto p-2 space-y-2 min-h-0">
+              {history.map((src, index) => (
+                <div
+                  key={`history-thumb-${index}`}
+                  className={`relative rounded-lg border-2 transition-all ${
+                    historyIndex === index
+                      ? 'border-blue-500 shadow-[0_0_0_1px_rgba(59,130,246,0.4)]'
+                      : 'border-transparent hover:border-[#555] opacity-90 hover:opacity-100'
+                  }`}
+                >
+                  <button
+                    type="button"
+                    onClick={() => setHistoryIndex(index)}
+                    title={
+                      index === 0
+                        ? 'Ảnh gốc (bản đầu tiên)'
+                        : `Bản chỉnh sửa thứ ${index} — click để xem`
+                    }
+                    className="w-full overflow-hidden rounded-md text-left focus:outline-none focus-visible:ring-2 focus-visible:ring-[#5558dd]"
+                  >
+                    <img
+                      src={src}
+                      alt=""
+                      className="w-full h-[80px] object-cover bg-[#2a2a2a] pointer-events-none select-none"
+                      draggable={false}
+                    />
+                    <div
+                      className={`text-[10px] py-1 px-1 text-center truncate ${
+                        historyIndex === index ? 'text-blue-300 bg-[#1a2332]' : 'text-[#888] bg-[#252525]'
+                      }`}
+                    >
+                      {index === 0 ? 'Gốc' : `Bản ${index}`}
+                    </div>
+                  </button>
+                  <button
+                    type="button"
+                    aria-label="Xóa khỏi lịch sử"
+                    title="Xóa khỏi lịch sử"
+                    onClick={(e) => removeHistoryAt(index, e)}
+                    className="absolute right-0.5 top-0.5 z-10 flex h-5 w-5 items-center justify-center rounded-full bg-black/75 text-[13px] font-bold leading-none text-white shadow hover:bg-red-600"
+                  >
+                    ×
+                  </button>
+                </div>
+              ))}
+            </div>
+          </aside>
+        )}
+
         {/* Canvas Area */}
         <div 
           className="flex-1 flex items-center justify-center p-2.5 bg-[#333] overflow-auto min-h-0 min-w-0 relative"
@@ -1156,20 +2293,84 @@ const FillImage = () => {
             backgroundImage: 'repeating-linear-gradient(45deg, #2a2a2a 0, #2a2a2a 10px, #333 10px, #333 20px)'
           }}
         >
+          {/* Phóng to / thu nhỏ ảnh chính */}
+          {(processedImage || selectedImage) && !simulateGrid && (
+            <div className="absolute top-2 right-2 z-30 flex flex-wrap items-center justify-end gap-1 rounded-lg border border-[#3a3a3a] bg-[#1e1e1e]/95 px-2 py-1.5 shadow-lg backdrop-blur-sm">
+              <button
+                type="button"
+                title="Thu nhỏ"
+                onClick={() => setCanvasZoom((z) => clampCanvasZoom(z / 1.2))}
+                className="flex h-7 w-7 items-center justify-center rounded bg-[#2a2a2a] text-lg font-semibold text-white hover:bg-[#3a3a3a]"
+              >
+                −
+              </button>
+              <span className="min-w-[3rem] text-center text-[11px] font-mono text-[#ccc]">
+                {Math.round(canvasZoom * 100)}%
+              </span>
+              <button
+                type="button"
+                title="Phóng to"
+                onClick={() => setCanvasZoom((z) => clampCanvasZoom(z * 1.2))}
+                className="flex h-7 w-7 items-center justify-center rounded bg-[#2a2a2a] text-lg font-semibold text-white hover:bg-[#3a3a3a]"
+              >
+                +
+              </button>
+              <button
+                type="button"
+                title="Đặt lại 100%"
+                onClick={() => setCanvasZoom(1)}
+                className="rounded bg-[#2a2a2a] px-2 py-1 text-[10px] font-medium text-[#aaa] hover:bg-[#3a3a3a] hover:text-white"
+              >
+                Reset
+              </button>
+            </div>
+          )}
+
           {/* Overlay mô phỏng lưới a x b */}
           {simulateGrid && selectedImage && (
             <div className="absolute inset-0 z-40 flex flex-col bg-[#1a1a1a]">
-              <div className="flex items-center justify-between px-4 py-2 bg-[#2a2a2a] border-b border-[#3a3a3a] shrink-0">
+              <div className="flex flex-wrap items-center gap-3 border-b border-[#3a3a3a] bg-[#2a2a2a] px-4 py-2 shrink-0">
                 <span className="text-sm text-white">
-                  Mô phỏng {simulateGrid.a} × {simulateGrid.b} (tổng {simulateGrid.a * simulateGrid.b} ảnh, đã cắt border 5px)
+                  Mô phỏng {simulateGrid.a} × {simulateGrid.b} ({simulateGrid.a * simulateGrid.b} ô)
                 </span>
+                <div className="mx-auto flex flex-wrap items-center gap-2 sm:mx-0">
+                  <span className="text-xs text-[#aaa]">Màu vật liệu:</span>
+                  <input
+                    type="color"
+                    value={simulateMaterialColor}
+                    onChange={(e) => setSimulateMaterialColor(e.target.value)}
+                    className="h-9 w-12 cursor-pointer rounded border border-[#555] bg-transparent p-0"
+                    title="Tô toàn bộ vùng đen bằng màu này"
+                  />
+                  <span className="font-mono text-[11px] text-[#888]">{simulateMaterialColor}</span>
+                  <div className="flex flex-wrap gap-1">
+                    {[
+                      { label: 'Gạch', hex: '#A52A2A' },
+                      { label: 'Xi măng', hex: '#B8B8B8' },
+                      { label: 'Đá', hex: '#708090' },
+                      { label: 'Gỗ', hex: '#8B4513' },
+                    ].map((p) => (
+                      <button
+                        key={p.hex}
+                        type="button"
+                        onClick={() => setSimulateMaterialColor(p.hex)}
+                        className="rounded border border-[#444] px-1.5 py-0.5 text-[10px] text-[#ccc] hover:bg-[#3a3a3a]"
+                      >
+                        {p.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
                 <button
                   onClick={handleCloseSimulate}
-                  className="px-3 py-1.5 bg-red-600 rounded text-sm font-medium hover:bg-red-700 transition-colors"
+                  className="ml-auto shrink-0 px-3 py-1.5 bg-red-600 rounded text-sm font-medium hover:bg-red-700 transition-colors"
                 >
                   Đóng
                 </button>
               </div>
+              <p className="border-b border-[#3a3a3a] bg-[#252525] px-4 py-1.5 text-[11px] text-[#999]">
+                Các pixel đen (RGB ≤ {DEFAULT_SIMULATE_BLACK_THRESHOLD}) được thay bằng màu đã chọn; vùng sáng giữ nguyên.
+              </p>
               <div className="flex-1 p-4 overflow-auto flex items-center justify-center min-h-0">
                 <div
                   className="grid gap-0 bg-[#1a1a1a] max-w-full max-h-full"
@@ -1182,9 +2383,14 @@ const FillImage = () => {
                   {Array.from({ length: simulateGrid.a * simulateGrid.b }).map((_, i) => (
                     <div key={i} className="min-w-0 min-h-0 bg-[#2a2a2a] overflow-hidden">
                       <img
-                        src={simulateCroppedImage || currentImage || selectedImage}
-                        alt={`Tile ${i + 1}`}
-                        className="w-full h-full object-cover"
+                        src={
+                          simulatePaintedImage ||
+                          simulateCroppedImage ||
+                          currentImage ||
+                          selectedImage
+                        }
+                        alt={`Ô ${i + 1}`}
+                        className="h-full w-full object-cover"
                       />
                     </div>
                   ))}
@@ -1197,22 +2403,33 @@ const FillImage = () => {
               {contoursData ? (
                 // Contour Mode: Multi-select và fill
                 <div className="relative w-full h-full flex items-center justify-center">
-                  <div className="relative inline-block" style={{ maxWidth: '100%', maxHeight: '100%' }}>
+                  <div
+                    className="relative inline-block rounded-lg shadow-[0_10px_40px_rgba(0,0,0,0.5)]"
+                    style={
+                      imageDimensions
+                        ? {
+                            width: imageDimensions.width * canvasZoom,
+                            height: imageDimensions.height * canvasZoom,
+                          }
+                        : { maxWidth: '100%', maxHeight: '100%' }
+                    }
+                  >
                     <img
                       ref={imgRef}
                       src={quadMode ? (currentImage || selectedImage || contoursData?.originalImg) : contoursData.originalImg}
                       alt="Image"
-                      className="max-w-full max-h-full object-contain rounded-lg shadow-[0_10px_40px_rgba(0,0,0,0.5)]"
+                      className="block rounded-lg"
                       style={{
                         display: 'block',
-                        maxWidth: '100%',
-                        maxHeight: 'calc(100vh - 100px)',
-                        width: 'auto',
-                        height: 'auto',
+                        width: imageDimensions ? imageDimensions.width * canvasZoom : undefined,
+                        height: imageDimensions ? imageDimensions.height * canvasZoom : undefined,
+                        maxWidth: !imageDimensions ? '100%' : undefined,
+                        maxHeight: !imageDimensions ? 'calc(100vh - 100px)' : undefined,
                         pointerEvents: contoursData ? 'none' : 'auto',
                       }}
                       onLoad={(e) => {
                         const img = e.currentTarget;
+                        setImageDimensions({ width: img.naturalWidth, height: img.naturalHeight });
                         const rect = img.getBoundingClientRect();
                         setDisplayDimensions({ width: rect.width, height: rect.height });
                       }}
@@ -1230,7 +2447,14 @@ const FillImage = () => {
                           height: '100%',
                         }}
                         onMouseMove={(e) => {
-                          if (quadMode && (draggingPointIndex !== null || draggingEdgeIndex !== null || pendingEdgeDragIndex !== null)) handleMouseMove(e);
+                          if (
+                            quadMode &&
+                            (draggingPointIndex !== null ||
+                              draggingEdgeIndex !== null ||
+                              pendingEdgeDragIndex !== null ||
+                              draggingSplineControl !== null)
+                          )
+                            handleMouseMove(e);
                           else handleContourCanvasMouseMove(e);
                         }}
                         onMouseUp={handleMouseUp}
@@ -1373,6 +2597,7 @@ const FillImage = () => {
                                     points={points.map(p => `${p.x},${p.y}`).join(' ')}
                                     fill="rgba(0, 255, 0, 0.1)"
                                     stroke="none"
+                                    style={{ pointerEvents: 'none' }}
                                   />
                                   
                                   {splineControlPointsByContour[contourId]?.length > 0
@@ -1382,11 +2607,17 @@ const FillImage = () => {
                                           cx={pt.x}
                                           cy={pt.y}
                                           r="8"
-                                          fill="cyan"
+                                          fill={
+                                            draggingSplineControl?.contourId === contourId &&
+                                            draggingSplineControl?.index === idx
+                                              ? 'yellow'
+                                              : 'cyan'
+                                          }
                                           stroke="white"
                                           strokeWidth={3}
-                                          className="cursor-default"
-                                          style={{ pointerEvents: 'none' }}
+                                          className={pointSelectMode ? 'cursor-default' : 'cursor-move'}
+                                          onMouseDown={(e) => handleSplineControlMouseDown(e, contourId, idx)}
+                                          style={{ pointerEvents: 'all' }}
                                         />
                                       ))
                                     : points.map((point, index) => {
@@ -1417,17 +2648,88 @@ const FillImage = () => {
                 </div>
               ) : (
                 // Mode bình thường: Hiển thị ảnh thông thường
-                <img
-                  ref={imgRef}
-                  src={processedImage || selectedImage || undefined}
-                  alt="Canvas"
-                  className="max-w-full max-h-full object-contain rounded-lg shadow-[0_10px_40px_rgba(0,0,0,0.5)]"
-                  style={{
-                    display: 'block',
-                    width: 'auto',
-                    height: 'auto'
-                  }}
-                />
+                <div
+                  className="relative inline-block rounded-lg shadow-[0_10px_40px_rgba(0,0,0,0.5)]"
+                  style={
+                    imageDimensions
+                      ? {
+                          width: imageDimensions.width * canvasZoom,
+                          height: imageDimensions.height * canvasZoom,
+                        }
+                      : undefined
+                  }
+                >
+                  <img
+                    ref={imgRef}
+                    src={processedImage || selectedImage || undefined}
+                    alt="Canvas"
+                    className="block max-w-full max-h-full rounded-lg object-contain"
+                    style={{
+                      display: 'block',
+                      width: imageDimensions ? imageDimensions.width * canvasZoom : 'auto',
+                      height: imageDimensions ? imageDimensions.height * canvasZoom : 'auto',
+                      maxWidth: !imageDimensions ? '100%' : undefined,
+                      maxHeight: !imageDimensions ? 'calc(100vh - 100px)' : undefined,
+                      pointerEvents: cutStretchMode ? 'none' : 'auto',
+                    }}
+                    onLoad={(e) => {
+                      const img = e.currentTarget;
+                      setImageDimensions({ width: img.naturalWidth, height: img.naturalHeight });
+                      const rect = img.getBoundingClientRect();
+                      setDisplayDimensions({ width: rect.width, height: rect.height });
+                    }}
+                  />
+                  {cutStretchMode && imageDimensions && (
+                    <svg
+                      className="absolute left-0 top-0 h-full w-full select-none"
+                      viewBox={`0 0 ${imageDimensions.width} ${imageDimensions.height}`}
+                      preserveAspectRatio="none"
+                      role="presentation"
+                      style={{ cursor: loading ? 'wait' : 'crosshair', touchAction: 'none' }}
+                      onMouseDown={handleCutStretchMouseDown}
+                    >
+                      <rect
+                        width={imageDimensions.width}
+                        height={imageDimensions.height}
+                        fill="transparent"
+                      />
+                      {cutStretchDraft && (
+                        <line
+                          x1={cutStretchDraft.x1}
+                          y1={cutStretchDraft.y1}
+                          x2={cutStretchDraft.x2}
+                          y2={cutStretchDraft.y2}
+                          stroke="#22d3ee"
+                          strokeWidth={Math.max(2, imageDimensions.width / 400)}
+                          strokeDasharray="8 5"
+                          style={{ pointerEvents: 'none' }}
+                        />
+                      )}
+                      {cutStretchCut?.kind === 'horizontal' && (
+                        <line
+                          x1={0}
+                          y1={cutStretchCut.pos}
+                          x2={imageDimensions.width}
+                          y2={cutStretchCut.pos}
+                          stroke="#84cc16"
+                          strokeWidth={Math.max(2, imageDimensions.width / 400)}
+                          style={{ pointerEvents: 'none' }}
+                        />
+                      )}
+                      {cutStretchCut?.kind === 'vertical' && (
+                        <line
+                          x1={cutStretchCut.pos}
+                          y1={0}
+                          x2={cutStretchCut.pos}
+                          y2={imageDimensions.height}
+                          stroke="#84cc16"
+                          strokeWidth={Math.max(2, imageDimensions.height / 400)}
+                          style={{ pointerEvents: 'none' }}
+                        />
+                      )}
+                    </svg>
+                  )}
+                </div>
               )}
             </div>
           ) : (
@@ -1449,7 +2751,95 @@ const FillImage = () => {
 
         {/* Right Sidebar - Tools Panel hoặc Contour Control */}
         <div className="w-[350px] min-w-[350px] max-w-[350px] bg-[#1e1e1e] border-l border-[#3a3a3a] flex flex-col overflow-y-auto shrink-0">
-          {quadMode ? (
+          {cutStretchMode ? (
+            <div className="flex flex-col flex-1 min-h-0">
+              <div className="p-3 border-b border-[#3a3a3a] bg-secondary text-white font-bold text-sm">
+                ✂️ Cắt & kéo giãn
+              </div>
+              <div className="p-3 space-y-4 text-sm text-[#ccc]">
+                <p className="text-xs leading-relaxed text-[#aaa]">
+                  <strong className="text-white">Bước 1:</strong> kéo trên ảnh một nét gần{' '}
+                  <strong>ngang</strong> để cắt theo hàng, hoặc gần <strong>dọc</strong> để cắt theo cột.
+                </p>
+                <p className="text-xs leading-relaxed text-[#aaa]">
+                  <strong className="text-white">Bước 2:</strong> chỉnh số pixel chèn vào khe (kéo giãn), chế độ lấp vùng chèn, rồi{' '}
+                  <strong className="text-cyan-300">Áp dụng</strong>.
+                </p>
+                {cutStretchCut && (
+                  <div className="rounded border border-cyan-700/50 bg-[#1a2a2a] px-2 py-1.5 text-xs text-cyan-200">
+                    {cutStretchCut.kind === 'horizontal'
+                      ? `Đường cắt ngang tại y ≈ ${cutStretchCut.pos}px`
+                      : `Đường cắt dọc tại x ≈ ${cutStretchCut.pos}px`}
+                  </div>
+                )}
+                <div>
+                  <label className="mb-1 block text-xs font-medium text-[#aaa]">
+                    Độ dãn (px chèn vào khe)
+                  </label>
+                  <input
+                    type="range"
+                    min={0}
+                    max={400}
+                    value={cutStretchInsertPx}
+                    onChange={(e) => setCutStretchInsertPx(Number(e.target.value))}
+                    disabled={loading}
+                    className="w-full accent-cyan-500"
+                  />
+                  <div className="text-center font-mono text-cyan-300">{cutStretchInsertPx}px</div>
+                </div>
+                <div>
+                  <span className="mb-2 block text-xs font-medium text-[#aaa]">Vùng chèn</span>
+                  <label className="flex cursor-pointer items-center gap-2 text-sm">
+                    <input
+                      type="radio"
+                      name="cutFill"
+                      checked={cutStretchFillMode === 'extrude'}
+                      onChange={() => setCutStretchFillMode('extrude')}
+                      disabled={loading}
+                    />
+                    Lặp pixel tại mép cắt (extrude)
+                  </label>
+                  <label className="mt-1 flex cursor-pointer items-center gap-2 text-sm">
+                    <input
+                      type="radio"
+                      name="cutFill"
+                      checked={cutStretchFillMode === 'solid'}
+                      onChange={() => setCutStretchFillMode('solid')}
+                      disabled={loading}
+                    />
+                    Tô màu đặc
+                  </label>
+                  {cutStretchFillMode === 'solid' && (
+                    <input
+                      type="color"
+                      value={cutStretchGapColor}
+                      onChange={(e) => setCutStretchGapColor(e.target.value)}
+                      disabled={loading}
+                      className="mt-2 h-9 w-full max-w-[120px] cursor-pointer rounded border border-[#555] bg-transparent"
+                    />
+                  )}
+                </div>
+                <div className="flex flex-col gap-2 pt-2">
+                  <button
+                    type="button"
+                    disabled={loading || !cutStretchCut}
+                    onClick={() => void handleApplyCutStretch()}
+                    className="rounded bg-cyan-700 px-4 py-2.5 text-sm font-medium text-white hover:bg-cyan-600 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    Áp dụng lên ảnh
+                  </button>
+                  <button
+                    type="button"
+                    disabled={loading}
+                    onClick={handleExitCutStretch}
+                    className="rounded border border-[#555] px-4 py-2 text-sm text-[#ccc] hover:bg-[#3a3a3a]"
+                  >
+                    Thoát
+                  </button>
+                </div>
+              </div>
+            </div>
+          ) : quadMode ? (
             <QuadTransformSidebar
               contoursData={contoursData}
               selectedQuadContourIds={selectedQuadContourIds}
@@ -1470,6 +2860,7 @@ const FillImage = () => {
               setPointMoveMode={setPointMoveMode}
               loading={loading}
               onSplineClick={handleSplineClick}
+              onResetQuadToMinRect={handleResetQuadToMinRect}
               onApplyTransform={handleApplyTransform}
               onExitQuadMode={handleExitQuadMode}
             />
@@ -1494,11 +2885,14 @@ const FillImage = () => {
 
               <div className="p-2">
                 {tools.map((tool) => {
-                  const handleClick = tool.id === 'get_contours' 
-                    ? handleGetContours 
-                    : tool.id === 'quad_transform'
-                    ? handleGetQuadPoints
-                    : () => handleProcessImage(tool.id);
+                  const handleClick =
+                    tool.id === 'get_contours'
+                      ? handleGetContours
+                      : tool.id === 'quad_transform'
+                        ? handleGetQuadPoints
+                        : tool.id === 'cut_stretch'
+                          ? handleEnterCutStretch
+                          : () => handleProcessImage(tool.id);
                   
                   return (
                     <button
