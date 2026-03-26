@@ -25,6 +25,8 @@ interface QuadTransformSidebarProps {
   setPointMoveMode: React.Dispatch<React.SetStateAction<'together' | 'symmetric'>>;
   loading: boolean;
   onSplineClick: () => void;
+  /** Reset 4 điểm tứ giác về hình chữ nhật bao nhỏ nhất (minAreaRect) cho contour đã chọn */
+  onResetQuadToMinRect: () => void;
   onApplyTransform: () => void;
   onExitQuadMode: () => void;
 }
@@ -49,6 +51,7 @@ export const QuadTransformSidebar: React.FC<QuadTransformSidebarProps> = ({
   setPointMoveMode,
   loading,
   onSplineClick,
+  onResetQuadToMinRect,
   onApplyTransform,
   onExitQuadMode,
 }) => {
@@ -72,7 +75,7 @@ export const QuadTransformSidebar: React.FC<QuadTransformSidebarProps> = ({
                 for (const id of ids) {
                   if (!quadPoints[id]) {
                     try {
-                      const res = await fetch(`${API_URL}/get-quad-points`, {
+                      const res = await fetch(`${API_URL}/get_quad_points`, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ img: currentImage || selectedImage }),
@@ -420,12 +423,35 @@ export const QuadTransformSidebar: React.FC<QuadTransformSidebarProps> = ({
             );
           })()}
 
+        {/* Reset tứ giác về hình chữ nhật bao contour */}
+        <div className="mb-3 pb-3 border-b border-[#3a3a3a]">
+          <button
+            type="button"
+            onClick={onResetQuadToMinRect}
+            disabled={loading || selectedQuadContourIds.length === 0}
+            className={`w-full px-3 py-2 rounded text-xs font-medium transition-colors ${
+              selectedQuadContourIds.length === 0 || loading
+                ? 'bg-gray-600 cursor-not-allowed opacity-50 text-gray-400'
+                : 'bg-orange-700 hover:bg-orange-600 text-white'
+            }`}
+            title="Đặt lại 4 điểm tứ giác theo hình chữ nhật nhỏ nhất bao quanh contour (giống lúc mới vào Quad Transform)"
+          >
+            {loading ? '⏳ …' : '↺ Reset tứ giác (min rect)'}
+          </button>
+          <p className="mt-1.5 text-[10px] text-[#888] leading-snug">
+            Áp dụng cho các contour đang tick: trả về đúng 4 góc của hình chữ nhật bao nhỏ nhất quanh viền contour; xóa trạng thái spline trên các contour đó.
+          </p>
+        </div>
+
         {/* Instructions */}
         <div className="mb-3 pb-3 border-b border-[#3a3a3a] text-xs text-[#aaa]">
           <div className="mb-2">📌 Hướng dẫn:</div>
           <div>• Click contour để chọn nhiều, chỉnh sửa áp dụng cho tất cả contour đã chọn</div>
           <div>• Kéo điểm/cạnh: tất cả contour đã chọn di chuyển cùng lúc</div>
           <div>• Bật chế độ thêm điểm để thêm điểm trên cạnh</div>
+          <div className="mt-1.5 text-cyan-300/90">
+            • <strong>Apply Transform</strong> chỉ áp dụng lên các contour đang tick trong danh sách phía trên
+          </div>
         </div>
 
         {/* Action buttons */}

@@ -7,6 +7,8 @@ from fill_img import (
     FillContourRequest,
     QuadPoint,
     QuadTransformRequest,
+    MinAreaQuadRequest,
+    min_area_quad_from_contour_points,
     base64_to_image,
     image_to_base64,
     fill_min,
@@ -21,7 +23,8 @@ from fill_img import (
     normalize_image_to_binary,
     add_black_border,
     get_contours,
-    process_image
+    process_image,
+    smooth_binary_pil,
 )
 
 @app.post("/fill_img")
@@ -134,10 +137,26 @@ async def get_quad_points_endpoint(request: ImageRequest) -> dict:
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
+@app.post("/min_area_quad_from_points")
+async def min_area_quad_from_points_endpoint(request: MinAreaQuadRequest) -> dict:
+    """
+    Từ danh sách đỉnh contour, trả về 4 góc của hình chữ nhật bao nhỏ nhất (minAreaRect).
+    Dùng khi reset quad trong Quad Transform.
+    """
+    try:
+        quad = min_area_quad_from_contour_points(request.points)
+        return {"quad": [{"x": p.x, "y": p.y} for p in quad]}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
 @app.post("/perspective_transform")
 async def perspective_transform_endpoint(request: QuadTransformRequest) -> ImageResponse:
     """
-    Fill tất cả các polygon với trắng bên trong, đen bên ngoài
+    Tô trắng bên trong các polygon có trong allQuadPoints (ảnh nền = ảnh gốc grayscale).
+    Chỉ các contour được gửi trong allQuadPoints mới được cập nhật.
     """
     try:
         # Chuyển đổi base64 thành PIL Image
@@ -173,6 +192,8 @@ async def normalize_binary_endpoint(request: ImageRequest) -> ImageResponse:
         binary_image = process_image(binary_image)
         # Thêm viền đen 2 pixel quanh toàn bộ ảnh
         binary_image = add_black_border(binary_image, width=2)
+        # Giảm gờ trắng mỏng gần biên (artifact sau chuẩn hóa / viền)
+        binary_image = smooth_binary_pil(binary_image)
 
         # Chuyển đổi lại thành base64
         result_base64 = image_to_base64(binary_image)
