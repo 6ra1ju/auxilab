@@ -513,6 +513,225 @@ def min_area_quad_from_contour_points(points: List[ContourPoint]) -> List[QuadPo
     return [QuadPoint(x=float(p[0]), y=float(p[1])) for p in box]
 
 
+def _order_points_clockwise(pts: np.ndarray) -> np.ndarray:
+    """Sort 2D points in clockwise order around centroid and start at top-left-ish."""
+    pts = np.asarray(pts, dtype=np.float32)
+    if len(pts) == 0:
+        return pts
+    c = pts.mean(axis=0)
+    ang = np.arctan2(pts[:, 1] - c[1], pts[:, 0] - c[0])
+    order = np.argsort(ang)
+    pts = pts[order]
+    start = int(np.argmin(pts[:, 0] + pts[:, 1]))
+    return np.roll(pts, -start, axis=0)
+
+
+def _max_point_line_distance(pts: np.ndarray, a: np.ndarray, b: np.ndarray) -> float:
+    ab = b - a
+    denom = float(np.hypot(ab[0], ab[1]))
+    if denom < 1e-6:
+        d = pts - a
+        return float(np.max(np.hypot(d[:, 0], d[:, 1])))
+    ap = pts - a
+    cross = np.abs(ap[:, 0] * ab[1] - ap[:, 1] * ab[0])
+    return float(np.max(cross / denom))
+
+
+def _point_line_distance(p: np.ndarray, a: np.ndarray, b: np.ndarray) -> float:
+    """Perpendicular distance from a single point to line AB."""
+    ab = b - a
+    denom = float(np.hypot(ab[0], ab[1]))
+    if denom < 1e-6:
+        d = p - a
+        return float(np.hypot(d[0], d[1]))
+    return float(abs((p[0] - a[0]) * ab[1] - (p[1] - a[1]) * ab[0]) / denom)
+
+
+def _dedupe_consecutive_closed(pts: np.ndarray, atol: float = 0.5) -> np.ndarray:
+    """Bỏ các điểm trùng hoặc quá sát nhau liên tiếp trên contour/polygon kín."""
+    pts = np.asarray(pts, dtype=np.float32)
+    if len(pts) == 0:
+        return pts
+    out = [pts[0]]
+    for p in pts[1:]:
+        if float(np.hypot(*(p - out[-1]))) > atol:
+            out.append(p)
+    out = np.asarray(out, dtype=np.float32)
+    if len(out) > 1 and float(np.hypot(*(out[0] - out[-1]))) <= atol:
+        out = out[:-1]
+    return out
+
+
+def _remove_short_edges_closed(poly: np.ndarray, min_edge_len: float) -> np.ndarray:
+    """Gộp các đỉnh tạo ra cạnh quá ngắn (thường là cụm điểm ở góc bậc thang)."""
+    poly = np.asarray(poly, dtype=np.float32)
+    changed = True
+    while changed and len(poly) > 3:
+        changed = False
+        n = len(poly)
+        for i in range(n):
+            j = (i + 1) % n
+            if float(np.hypot(*(poly[j] - poly[i]))) >= min_edge_len:
+                continue
+            prev_pt = poly[(i - 1) % n]
+            cur_pt = poly[i]
+            next_pt = poly[j]
+            after_pt = poly[(j + 1) % n]
+            d_cur = _point_line_distance(cur_pt, prev_pt, after_pt)
+            d_next = _point_line_distance(next_pt, prev_pt, after_pt)
+            remove_idx = i if d_cur <= d_next else j
+            poly = np.delete(poly, remove_idx, axis=0)
+            changed = True
+            break
+    return poly
+
+
+def _remove_near_collinear_points_closed(poly: np.ndarray, line_tol: float) -> np.ndarray:
+    """Bỏ đỉnh gần như thẳng hàng với hai đỉnh kề trước/sau."""
+    poly = np.asarray(poly, dtype=np.float32)
+    changed = True
+    while changed and len(poly) > 3:
+        changed = False
+        n = len(poly)
+        for i in range(n):
+            prev_pt = poly[(i - 1) % n]
+            cur_pt = poly[i]
+            next_pt = poly[(i + 1) % n]
+            if _point_line_distance(cur_pt, prev_pt, next_pt) <= line_tol:
+                poly = np.delete(poly, i, axis=0)
+                changed = True
+                break
+    return poly
+
+
+def _uniform_subsample_closed(poly: np.ndarray, max_points: int) -> np.ndarray:
+    """Giảm số điểm khi polygon còn quá dày."""
+    poly = np.asarray(poly, dtype=np.float32)
+    if len(poly) <= max_points:
+        return poly
+    idxs = np.linspace(0, len(poly), max_points, endpoint=False).round().astype(int)
+    idxs = np.clip(idxs, 0, len(poly) - 1)
+    idxs = np.unique(idxs)
+    return poly[idxs]
+
+
+def _point_segment_distance(p: np.ndarray, a: np.ndarray, b: np.ndarray) -> float:
+    """Khoảng cách ngắn nhất từ điểm p tới đoạn thẳng AB."""
+    p = np.asarray(p, dtype=np.float32)
+    a = np.asarray(a, dtype=np.float32)
+    b = np.asarray(b, dtype=np.float32)
+    ab = b - a
+    denom = float(np.dot(ab, ab))
+    if denom < 1e-6:
+        d = p - a
+        return float(np.hypot(d[0], d[1]))
+    t = float(np.dot(p - a, ab) / denom)
+    t = max(0.0, min(1.0, t))
+    q = a + t * ab
+    d = p - q
+    return float(np.hypot(d[0], d[1]))
+
+
+def _max_distance_to_closed_polygon(pts: np.ndarray, poly: np.ndarray) -> float:
+    """Max khoảng cách từ tập điểm pts tới biên polygon kín poly."""
+    pts = np.asarray(pts, dtype=np.float32)
+    poly = np.asarray(poly, dtype=np.float32)
+    if len(pts) == 0 or len(poly) < 2:
+        return 0.0
+    n = len(poly)
+    max_d = 0.0
+    for p in pts:
+        d = min(_point_segment_distance(p, poly[i], poly[(i + 1) % n]) for i in range(n))
+        max_d = max(max_d, d)
+    return float(max_d)
+
+
+def adaptive_polygon_from_contour_points(
+    points: List[ContourPoint],
+    d_tol: float = 3.0,
+    max_points: int = 96,
+) -> List[QuadPoint]:
+    """
+    Tạo polygon ít điểm nhưng ổn định cho contour ảnh binary.
+
+    Ý tưởng:
+    1) Lấy convex hull để bỏ các lõm/răng cưa nhỏ do raster.
+    2) Nếu contour rất gần minAreaRect -> snap thẳng về 4 góc box.
+       Điều này xử lý case như contour 13: chỉ còn 1 điểm ở mỗi góc.
+    3) Nếu không phải rectangle, thử nhiều mức epsilon của Douglas-Peucker
+       và chọn candidate có ít điểm nhất nhưng vẫn giữ shape đủ sát hull.
+       Cách này giúp các contour kiểu 6 / 14 / 15 ổn định và đồng nhất số điểm.
+    """
+    pts = np.array([[p.x, p.y] for p in points], dtype=np.float32)
+    pts = _dedupe_consecutive_closed(pts)
+    if len(pts) < 3:
+        raise ValueError("Cần ít nhất 3 điểm")
+
+    hull = cv2.convexHull(pts.reshape((-1, 1, 2))).reshape((-1, 2)).astype(np.float32)
+    hull = _dedupe_consecutive_closed(hull)
+    if len(hull) < 3:
+        return min_area_quad_from_contour_points(points)
+
+    x, y, w, h = cv2.boundingRect(hull.astype(np.int32))
+    min_dim = float(min(w, h))
+    max_dim = float(max(w, h))
+    perimeter = float(cv2.arcLength(hull.reshape((-1, 1, 2)), True))
+    hull_area = float(cv2.contourArea(hull.reshape((-1, 1, 2))))
+    if hull_area < 1e-6:
+        return min_area_quad_from_contour_points(points)
+
+    # 1) Rectangle snap cho các contour gần hình chữ nhật / hình vuông.
+    rect = cv2.minAreaRect(hull.reshape((-1, 1, 2)))
+    box = cv2.boxPoints(rect).astype(np.float32)
+    box_area = float(abs(cv2.contourArea(box.reshape((-1, 1, 2)))))
+    box_fill_ratio = hull_area / max(box_area, 1e-6)
+    box_max_dist = _max_distance_to_closed_polygon(hull, box)
+    rect_snap_tol = max(9.5, 0.042 * max_dim, d_tol * 2.4)
+    if box_fill_ratio >= 0.94 and box_max_dist <= rect_snap_tol:
+        poly = _order_points_clockwise(box)
+        poly = _uniform_subsample_closed(poly, max_points=max_points)
+        return [QuadPoint(x=float(p[0]), y=float(p[1])) for p in poly]
+
+    # 2) Thử nhiều epsilon và chọn polygon có ít điểm nhất nhưng vẫn đủ sát hull.
+    area_ratio_tol = 0.895
+    shape_tol = max(9.5, 0.042 * max_dim, d_tol * 2.4)
+    base_floor = max(float(d_tol * 2.0), 0.02 * min_dim)
+
+    best_poly = None
+    best_key = None
+    for mult in [0.012, 0.014, 0.016, 0.018, 0.020, 0.024]:
+        epsilon = max(base_floor, float(mult * perimeter))
+        cand = cv2.approxPolyDP(hull.reshape((-1, 1, 2)), epsilon, True).reshape((-1, 2)).astype(np.float32)
+        cand = _dedupe_consecutive_closed(cand)
+        if len(cand) < 3:
+            continue
+
+        cand_area = float(abs(cv2.contourArea(cand.reshape((-1, 1, 2)))))
+        cand_area_ratio = cand_area / hull_area
+        cand_max_dist = _max_distance_to_closed_polygon(hull, cand)
+
+        if cand_area_ratio < area_ratio_tol or cand_max_dist > shape_tol:
+            continue
+
+        key = (len(cand), cand_max_dist, -cand_area_ratio)
+        if best_key is None or key < best_key:
+            best_key = key
+            best_poly = cand
+
+    if best_poly is None:
+        epsilon = max(base_floor, float(0.014 * perimeter))
+        best_poly = cv2.approxPolyDP(hull.reshape((-1, 1, 2)), epsilon, True).reshape((-1, 2)).astype(np.float32)
+
+    if len(best_poly) < 3:
+        return min_area_quad_from_contour_points(points)
+
+    best_poly = _dedupe_consecutive_closed(best_poly)
+    best_poly = _uniform_subsample_closed(best_poly, max_points=max_points)
+    best_poly = _order_points_clockwise(best_poly)
+
+    return [QuadPoint(x=float(p[0]), y=float(p[1])) for p in best_poly]
+
+
 def get_quad_points_for_contours(contours: List[Contour]) -> dict:
     """Lấy 4 điểm góc của hình tứ giác bao trùm cho mỗi contour"""
     result = {}
@@ -520,7 +739,11 @@ def get_quad_points_for_contours(contours: List[Contour]) -> dict:
         if len(contour.points) < 3:
             continue
         try:
-            result[contour.id] = min_area_quad_from_contour_points(contour.points)
+            result[contour.id] = adaptive_polygon_from_contour_points(
+                contour.points,
+                d_tol=3.5,
+                max_points=12,
+            )
         except ValueError:
             continue
 
