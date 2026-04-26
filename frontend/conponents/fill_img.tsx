@@ -43,6 +43,8 @@ export interface SelectedQuadPoint {
   pointIndex: number;
 }
 
+type ExportFormat = 'png' | 'jpg' | 'jpeg' | 'svg';
+
 // API base URL – ưu tiên cấu hình từ Vite, fallback về localhost:8000
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 
@@ -357,6 +359,9 @@ const FillImage = () => {
 
   // Mô phỏng vật liệu xây dựng: lưới a x b
   const [showSimulateModal, setShowSimulateModal] = useState(false);
+  const [showExportModal, setShowExportModal] = useState(false);
+  const [exportFormat, setExportFormat] = useState<ExportFormat>('png');
+  const [exportFilename, setExportFilename] = useState('image-enhance');
   const [simulateGrid, setSimulateGrid] = useState<{ a: number; b: number } | null>(null);
   const [simulateInputA, setSimulateInputA] = useState<string>('2');
   const [simulateInputB, setSimulateInputB] = useState<string>('2');
@@ -1932,6 +1937,154 @@ const FillImage = () => {
 
   // Mở modal mô phỏng
   const handleOpenSimulate = () => setShowSimulateModal(true);
+  const handleOpenExport = () => {
+    if (!currentImage && !selectedImage) {
+      alert('Vui lòng mở ảnh trước khi lưu.');
+      return;
+    }
+    setShowExportModal(true);
+  };
+
+  const sanitizeFilename = (raw: string) => {
+    const cleaned = raw
+      .trim()
+      .replace(/[\\/:*?"<>|]/g, '-')
+      .replace(/\s+/g, '-')
+      .replace(/-+/g, '-')
+      .replace(/^-|-$/g, '');
+    return cleaned || 'image-enhance';
+  };
+
+  const triggerDownload = (href: string, filename: string) => {
+    const a = document.createElement('a');
+    a.href = href;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  };
+
+  const loadImageElement = (src: string): Promise<HTMLImageElement> =>
+    new Promise((resolve, reject) => {
+      const img = new Image();
+      img.onload = () => resolve(img);
+      img.onerror = () => reject(new Error('Không thể đọc ảnh để xuất.'));
+      img.src = src;
+    });
+
+  const exportRasterImage = async (src: string, format: Extract<ExportFormat, 'png' | 'jpg' | 'jpeg'>, filename: string) => {
+    const img = await loadImageElement(src);
+    const canvas = document.createElement('canvas');
+    canvas.width = img.width;
+    canvas.height = img.height;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) throw new Error('Không khởi tạo được canvas để xuất ảnh.');
+
+    if (format === 'jpg' || format === 'jpeg') {
+      ctx.fillStyle = '#000000';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.drawImage(img, 0, 0);
+      triggerDownload(canvas.toDataURL('image/jpeg', 0.95), `${filename}.jpg`);
+      return;
+    }
+
+    // PNG
+    ctx.drawImage(img, 0, 0);
+    triggerDownload(canvas.toDataURL('image/png'), `${filename}.png`);
+  };
+
+  const exportAsSvg = async (src: string, filename: string) => {
+    let contoursForSvg: Contour[] | null = null;
+    if (contoursData && contoursData.contours.length > 0 && contoursData.originalImg === src) {
+      contoursForSvg = contoursData.contours;
+    } else {
+      const res = await fetch(`${API_URL}/get_contours`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ img: src }),
+      });
+      if (!res.ok) {
+        const errText = await res.text();
+        throw new Error(errText || 'Không lấy được contour để xuất SVG.');
+      }
+      const data = (await res.json()) as ContoursData;
+      contoursForSvg = data.contours;
+    }
+
+    const img = await loadImageElement(src);
+    const W = img.width;
+    const H = img.height;
+    // Đổi polygon thô -> path đã lọc/simplify để tăng tương thích với editor vector.
+    const makePathD = (pts: ContourPoint[]) => {
+      if (pts.length < 3) return '';
+      const cleaned: Array<{ x: number; y: number }> = [];
+      for (const p of pts) {
+        const x = Math.max(0, Math.min(W, Math.round(p.x)));
+        const y = Math.max(0, Math.min(H, Math.round(p.y)));
+        if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+        const prev = cleaned[cleaned.length - 1];
+        if (!prev || prev.x !== x || prev.y !== y) cleaned.push({ x, y });
+      }
+      if (cleaned.length < 3) return '';
+
+      // Simplify nhẹ bằng lấy mẫu đều để tránh path quá nặng (Vectornator dễ fail với contour quá dày).
+      const MAX_POINTS = 240;
+      let sampled = cleaned;
+      if (cleaned.length > MAX_POINTS) {
+        sampled = [];
+        for (let i = 0; i < MAX_POINTS; i++) {
+          const idx = Math.round((i * (cleaned.length - 1)) / (MAX_POINTS - 1));
+          sampled.push(cleaned[idx]);
+        }
+      }
+      if (sampled.length < 3) return '';
+      const first = sampled[0];
+      const rest = sampled.slice(1).map((p) => `L ${p.x} ${p.y}`).join(' ');
+      return `M ${first.x} ${first.y} ${rest} Z`;
+    };
+
+    const paths = (contoursForSvg ?? [])
+      .map((c) => makePathD(c.points))
+      .filter((d) => d.length > 0)
+      .map((d) => `<path d="${d}" fill="#ffffff" stroke="none" />`)
+      .join('\n');
+
+    const svg = [
+      `<?xml version="1.0" encoding="UTF-8"?>`,
+      `<svg xmlns="http://www.w3.org/2000/svg" version="1.1" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">`,
+      `<rect x="0" y="0" width="${W}" height="${H}" fill="#000000" />`,
+      paths,
+      `</svg>`,
+    ].join('\n');
+
+    const blob = new Blob([svg], { type: 'image/svg+xml;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    try {
+      triggerDownload(url, `${filename}.svg`);
+    } finally {
+      URL.revokeObjectURL(url);
+    }
+  };
+
+  const handleConfirmExport = async () => {
+    const src = currentImage || selectedImage;
+    if (!src) return;
+    const filename = sanitizeFilename(exportFilename);
+    setLoading(true);
+    try {
+      if (exportFormat === 'svg') {
+        await exportAsSvg(src, filename);
+      } else {
+        await exportRasterImage(src, exportFormat, filename);
+      }
+      setShowExportModal(false);
+    } catch (error) {
+      console.error('Export error:', error);
+      alert(error instanceof Error ? error.message : 'Không thể xuất file.');
+    } finally {
+      setLoading(false);
+    }
+  };
 
   // Xác nhận mô phỏng a x b
   const handleConfirmSimulate = () => {
@@ -2102,11 +2255,17 @@ const FillImage = () => {
               📐 Mô phỏng
             </button>
           </Tooltip>
-          <Tooltip label="Lưu (sẽ ra mắt sau)" side="bottom">
+          <Tooltip label="Lưu ảnh đã chỉnh sửa: PNG, JPG/JPEG hoặc SVG" side="bottom">
             <button
               type="button"
               aria-label="Lưu"
-              className="w-8 h-8 bg-[#2a2a2a] rounded-md text-white cursor-pointer text-sm flex items-center justify-center hover:bg-[#3a3a3a] transition-colors"
+              onClick={handleOpenExport}
+              disabled={!selectedImage || loading}
+              className={`w-8 h-8 rounded-md text-white text-sm flex items-center justify-center transition-colors ${
+                selectedImage && !loading
+                  ? 'bg-[#2a2a2a] cursor-pointer hover:bg-[#3a3a3a]'
+                  : 'bg-[#2a2a2a] opacity-50 cursor-not-allowed'
+              }`}
             >
               💾
             </button>
@@ -2200,6 +2359,83 @@ const FillImage = () => {
                 className="px-4 py-2 bg-amber-600 rounded text-sm font-medium hover:bg-amber-700 transition-colors"
               >
                 Xem
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal lưu ảnh */}
+      {showExportModal && (
+        <div
+          className="fixed inset-0 z-[60] flex items-center justify-center bg-black/70 p-4"
+          onClick={() => !loading && setShowExportModal(false)}
+        >
+          <div
+            className="w-full max-w-md rounded-lg border border-[#3a3a3a] bg-[#2a2a2a] p-5 shadow-xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h3 className="mb-3 text-lg font-semibold text-white">Lưu ảnh đã chỉnh sửa</h3>
+            <div className="mb-3">
+              <label className="mb-1 block text-xs font-medium text-[#aaa]">Tên file</label>
+              <input
+                type="text"
+                value={exportFilename}
+                onChange={(e) => setExportFilename(e.target.value)}
+                className="w-full rounded border border-[#3a3a3a] bg-[#1e1e1e] px-3 py-2 text-sm text-white"
+                placeholder="image-enhance"
+              />
+            </div>
+
+            <div className="mb-4 rounded border border-[#3a3a3a] bg-[#1e1e1e] p-3">
+              <div className="mb-2 text-xs font-medium text-[#aaa]">Định dạng xuất</div>
+              <div className="space-y-2 text-sm text-[#ddd]">
+                <label className="flex cursor-pointer items-center gap-2">
+                  <input
+                    type="radio"
+                    name="exportFormat"
+                    checked={exportFormat === 'png'}
+                    onChange={() => setExportFormat('png')}
+                  />
+                  PNG (raster, không mất dữ liệu)
+                </label>
+                <label className="flex cursor-pointer items-center gap-2">
+                  <input
+                    type="radio"
+                    name="exportFormat"
+                    checked={exportFormat === 'jpg' || exportFormat === 'jpeg'}
+                    onChange={() => setExportFormat('jpg')}
+                  />
+                  JPG / JPEG (raster, dung lượng nhỏ)
+                </label>
+                <label className="flex cursor-pointer items-center gap-2">
+                  <input
+                    type="radio"
+                    name="exportFormat"
+                    checked={exportFormat === 'svg'}
+                    onChange={() => setExportFormat('svg')}
+                  />
+                  SVG (vector từ contour hiện tại)
+                </label>
+              </div>
+            </div>
+
+            <div className="flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setShowExportModal(false)}
+                disabled={loading}
+                className="rounded bg-[#3a3a3a] px-4 py-2 text-sm text-white hover:bg-[#4a4a4a] disabled:opacity-50"
+              >
+                Hủy
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleConfirmExport()}
+                disabled={loading || !selectedImage}
+                className="rounded bg-cyan-700 px-4 py-2 text-sm font-medium text-white hover:bg-cyan-600 disabled:opacity-50"
+              >
+                {loading ? '⏳ Đang xuất...' : 'Tải xuống'}
               </button>
             </div>
           </div>
