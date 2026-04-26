@@ -1,0 +1,192 @@
+@startuml image-enhance-use-case-detailed
+title Sơ đồ Use Case — Ứng dụng web xử lý và tăng cường ảnh (Image Enhance)\n(Frontend React + Backend FastAPI)
+
+' Tổng chiều ngang vừa trình render web (~4096px)
+scale max 3200 width
+
+skinparam rectangle {
+  BackgroundColor #E8F4FC
+  BorderColor #2E6DA4
+}
+skinparam packageStyle rectangle
+skinparam usecase {
+  BackgroundColor #FFFFFF
+  BorderColor #333333
+}
+' Bố cục: trái = Người dùng | giữa = Hệ thống | phải = Trình duyệt
+left to right direction
+skinparam nodesep 28
+skinparam ranksep 32
+
+together {
+  actor "Người dùng" as User
+  rectangle "Ứng dụng web xử lý và tăng cường ảnh (Image Enhance)" as SYS #LightBlue {
+  ' Bên trong hệ thống: chỉ xếp dọc (tránh bậc thang chéo)
+  top to bottom direction
+
+  package "Quản lý phiên làm việc và ảnh" as PKG_Sess #White {
+    usecase "Mở ảnh" as UC_Open
+    usecase "Gửi ảnh chuẩn hóa nhị phân\n(normalize_binary)" as UC_Norm
+    usecase "Hiển thị ảnh và khởi tạo\nlịch sử phiên bản" as UC_Show
+    usecase "Dùng ảnh gốc khi API lỗi\n(fallback)" as UC_Fallback
+    usecase "Xóa ảnh và làm mới phiên" as UC_Clear
+    usecase "Hoàn tác (Undo)" as UC_Undo
+    usecase "Làm lại (Redo)" as UC_Redo
+    usecase "Lưu tự động phiên làm việc\n(localStorage)" as UC_Autosave
+    usecase "Khôi phục phiên khi\ntải lại trang" as UC_Restore
+  }
+
+  package "Công cụ chỉnh sửa ảnh tổng quát\n(API fill_img)" as PKG_Tools #White {
+    usecase "Áp dụng công cụ xử lý ảnh\n(fill_img)" as UC_ToolParent
+    usecase "Sharpen" as UC_Sharpen
+    usecase "Blur" as UC_Blur
+    usecase "Brightness" as UC_Bright
+    usecase "Contrast" as UC_Contrast
+    usecase "Saturation" as UC_Sat
+    usecase "Fill Min\n(đối xứng min)" as UC_FMin
+    usecase "Fill Max\n(đối xứng max)" as UC_FMax
+    usecase "Cập nhật ảnh và lịch sử\nsau xử lý" as UC_ToolHist
+  }
+
+  package "Chế độ Fill Contours" as PKG_FC #White {
+    usecase "Vào chế độ Fill Contours" as UC_FC_Enter
+    usecase "Trích xuất contour\n(get_contours)" as UC_FC_Get
+    usecase "Hiển thị overlay contour" as UC_FC_Overlay
+    usecase "Chọn contour trên canvas\n(click bật/tắt)" as UC_FC_Pick
+    usecase "Chọn tất cả contour" as UC_FC_All
+    usecase "Bỏ chọn tất cả contour" as UC_FC_None
+    usecase "Chọn màu tô (Fill Color)" as UC_FC_Color
+    usecase "Tô contour đã chọn\n(fill_contour)" as UC_FC_Fill
+    usecase "Thoát chế độ contour" as UC_FC_Exit
+  }
+
+  package "Chế độ Quad Transform" as PKG_QT #White {
+    usecase "Vào chế độ Quad Transform" as UC_QT_Enter
+    usecase "Lấy điểm quad và contour nâng cao\n(get_quad_points)" as UC_QT_Get
+    usecase "Chọn một hoặc nhiều contour\n(danh sách / chọn tất cả)" as UC_QT_SelC
+    usecase "Tải quad cho contour\nchưa có điểm" as UC_QT_LoadQ
+    usecase "Chỉnh hình đa giác\nkéo đỉnh" as UC_QT_Vtx
+    usecase "Thêm điểm trên cạnh" as UC_QT_AddPt
+    usecase "Chọn và kéo cạnh" as UC_QT_Edge
+    usecase "Chế độ chọn điểm" as UC_QT_PSel
+    usecase "Di chuyển điểm cùng nhau\nhoặc đối xứng" as UC_QT_Move
+    usecase "Tạo đường Spline\n(≥3 điểm)" as UC_QT_Spline
+    usecase "Xem và sửa số liệu\nđiểm / độ dài cạnh" as UC_QT_Table
+    usecase "Reset quad về min-area rect\n(min_area_quad_from_points)" as UC_QT_Reset
+    usecase "Áp dụng biến đổi đa giác\n(perspective_transform)" as UC_QT_Apply
+    usecase "Đối xứng quad sang\ncontour đối diện\n(Ox / Oy / cả hai)" as UC_QT_Mirror
+    usecase "Thoát chế độ Quad Transform" as UC_QT_Exit
+  }
+
+  package "Cắt và kéo giãn ảnh\n(xử lý client)" as PKG_CS #White {
+    usecase "Vào chế độ Cắt & kéo giãn" as UC_CS_Enter
+    usecase "Vạch đường cắt ngang hoặc dọc" as UC_CS_Draw
+    usecase "Di chuyển đường cắt đã đặt" as UC_CS_MoveL
+    usecase "Cấu hình chèn pixel,\nmàu và chế độ tô" as UC_CS_Config
+    usecase "Áp dụng chèn khoảng\n(canvas)" as UC_CS_Apply
+    usecase "Thoát chế độ cắt kéo giãn" as UC_CS_Exit
+  }
+
+  package "Mô phỏng lưới vật liệu" as PKG_Sim #White {
+    usecase "Mở hộp thoại mô phỏng\na × b và màu vật liệu" as UC_Sim_Open
+    usecase "Kiểm tra a, b trong [1..20]" as UC_Sim_Valid
+    usecase "Cắt viền đen trước khi chia ô" as UC_Sim_Crop
+    usecase "Hiển thị lưới mô phỏng\ntrên ảnh" as UC_Sim_Show
+    usecase "Đóng / hủy mô phỏng" as UC_Sim_Close
+  }
+
+  package "Điều khiển giao diện" as PKG_UI #White {
+    usecase "Điều chỉnh zoom vùng xem" as UC_UI_Zoom
+    usecase "Phóng to" as UC_Z_In
+    usecase "Thu nhỏ" as UC_Z_Out
+    usecase "Reset zoom về 100%" as UC_Z_Reset
+    usecase "Mở panel TOOLS\n(sidebar công cụ)" as UC_UI_Tools
+  }
+
+  ' Xếp các gói theo cột dọc (mũi tên hướng xuống để Graphviz không kéo chéo)
+  PKG_Sess -down[hidden]-> PKG_Tools
+  PKG_Tools -down[hidden]-> PKG_FC
+  PKG_FC -down[hidden]-> PKG_QT
+  PKG_QT -down[hidden]-> PKG_CS
+  PKG_CS -down[hidden]-> PKG_Sim
+  PKG_Sim -down[hidden]-> PKG_UI
+  }
+  actor "Trình duyệt\n(localStorage)" as Browser
+}
+
+' Chỉ hai cạnh tới hệ thống — tránh “mạng nhện” trăm đường từ tác nhân
+User --> SYS
+Browser --> SYS
+
+' --- Quản lý phiên: include / extend ---
+UC_Open ..> UC_Norm : <<include>>
+UC_Open ..> UC_Show : <<include>>
+' Fallback mở rộng luồng chuẩn hóa khi API lỗi (hành vi tùy chọn)
+UC_Norm <.. UC_Fallback : <<extend>>
+
+' --- Công cụ tổng quát: khái quát hóa (mỗi lần chỉ một công cụ cụ thể) ---
+UC_ToolParent <|-- UC_Sharpen
+UC_ToolParent <|-- UC_Blur
+UC_ToolParent <|-- UC_Bright
+UC_ToolParent <|-- UC_Contrast
+UC_ToolParent <|-- UC_Sat
+UC_ToolParent <|-- UC_FMin
+UC_ToolParent <|-- UC_FMax
+UC_Sharpen ..> UC_ToolHist : <<include>>
+UC_Blur ..> UC_ToolHist : <<include>>
+UC_Bright ..> UC_ToolHist : <<include>>
+UC_Contrast ..> UC_ToolHist : <<include>>
+UC_Sat ..> UC_ToolHist : <<include>>
+UC_FMin ..> UC_ToolHist : <<include>>
+UC_FMax ..> UC_ToolHist : <<include>>
+
+' --- Fill Contours ---
+UC_FC_Enter ..> UC_FC_Get : <<include>>
+UC_FC_Enter ..> UC_FC_Overlay : <<include>>
+UC_FC_Fill ..> UC_FC_Color : <<include>>
+' Chọn contour là tiền đề nghiệp vụ trước khi tô (không bắt buộc quan hệ include giữa các UC lá)
+
+' --- Quad Transform ---
+UC_QT_Enter ..> UC_QT_Get : <<include>>
+UC_QT_SelC ..> UC_QT_LoadQ : <<include>>
+UC_QT_PSel ..> UC_QT_Move : <<include>>
+' Sau khi áp dụng biến đổi, có thể mở rộng bằng đối xứng contour đối diện
+UC_QT_Apply <.. UC_QT_Mirror : <<extend>>
+
+' --- Cắt kéo giãn ---
+UC_CS_Apply ..> UC_CS_Draw : <<include>>
+UC_CS_Apply ..> UC_CS_Config : <<include>>
+
+' --- Mô phỏng ---
+UC_Sim_Open ..> UC_Sim_Valid : <<include>>
+UC_Sim_Open ..> UC_Sim_Show : <<include>>
+UC_Sim_Show ..> UC_Sim_Crop : <<include>>
+
+' --- Zoom ---
+UC_UI_Zoom ..> UC_Z_In : <<include>>
+UC_UI_Zoom ..> UC_Z_Out : <<include>>
+UC_UI_Zoom ..> UC_Z_Reset : <<include>>
+
+' (Đã bỏ liên kết tác nhân → từng use case: gây rối bố cục. Hai tác nhân chỉ nối tới ranh giới SYS — xem ghi chú dưới.)
+
+note right of UC_Autosave
+  **Ghi chú:** Tự động lưu **history**
+  và **historyIndex** khi state thay đổi.
+  **Khôi phục** chạy khi tải lại trang.
+end note
+
+note bottom of SYS
+  **Tương tác tác nhân:** **Người dùng** kích hoạt chức năng qua UI;
+  **Trình duyệt** thực thi fetch, canvas, SVG/DOM, **localStorage**, hiển thị.
+  Sơ đồ chỉ nối tới **ranh giới hệ thống** để bố cục đọc được.
+  Chi tiết từng use case (ai kích hoạt / phần nào chạy trên client)
+  nằm trong **đặc tả ca sử dụng** hoặc có thể vẽ **sơ đồ phân rã** riêng.
+end note
+
+note bottom of UC_ToolParent
+  Mỗi lần chọn một công cụ con,
+  frontend gọi **POST /fill_img**
+  với tham số **tool** tương ứng.
+end note
+
+@enduml

@@ -9,6 +9,7 @@ from fill_img import (
     QuadTransformRequest,
     MinAreaQuadRequest,
     min_area_quad_from_contour_points,
+    adaptive_polygon_from_contour_points,
     base64_to_image,
     image_to_base64,
     fill_min,
@@ -146,6 +147,26 @@ async def min_area_quad_from_points_endpoint(request: MinAreaQuadRequest) -> dic
     try:
         quad = min_area_quad_from_contour_points(request.points)
         return {"quad": [{"x": p.x, "y": p.y} for p in quad]}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/adaptive_polygon_from_points")
+async def adaptive_polygon_from_points_endpoint(request: MinAreaQuadRequest) -> dict:
+    """
+    Từ danh sách đỉnh contour, trả về polygon bao quanh nhỏ nhất theo pipeline
+    Douglas-Peucker đang dùng trong Quad Transform.
+    Dùng khi reset polygon trong Quad Transform.
+    """
+    try:
+        poly = adaptive_polygon_from_contour_points(
+            request.points,
+            d_tol=4.0,
+            max_points=12,
+        )
+        return {"polygon": [{"x": p.x, "y": p.y} for p in poly]}
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:

@@ -1,6 +1,7 @@
 /// <reference types="vite/client" />
 import React from 'react';
 import type { ContoursData, SelectedQuadPoint } from './fill_img';
+import { Tooltip } from './tooltip';
 
 const API_URL = import.meta.env.VITE_API_URL || "http://localhost:8000";
 interface QuadTransformSidebarProps {
@@ -25,7 +26,7 @@ interface QuadTransformSidebarProps {
   setPointMoveMode: React.Dispatch<React.SetStateAction<'together' | 'symmetric'>>;
   loading: boolean;
   onSplineClick: () => void;
-  /** Reset 4 điểm tứ giác về hình chữ nhật bao nhỏ nhất (minAreaRect) cho contour đã chọn */
+  /** Reset polygon về bao quanh nhỏ nhất theo Douglas-Peucker cho contour đã chọn */
   onResetQuadToMinRect: () => void;
   onApplyTransform: () => void;
   onExitQuadMode: () => void;
@@ -66,44 +67,51 @@ export const QuadTransformSidebar: React.FC<QuadTransformSidebarProps> = ({
         <div className="mb-3 pb-3 border-b border-[#3a3a3a]">
           <label className="text-xs font-medium mb-2 block">Chọn Contour (click để chọn nhiều):</label>
           <div className="flex gap-1 mb-2">
-            <button
-              onClick={async () => {
-                if (!contoursData) return;
-                const ids = contoursData.contours.map((c) => c.id);
-                setSelectedQuadContourIds(ids);
+            <Tooltip
+              label="Chọn toàn bộ contour và tải sẵn 4 điểm tứ giác cho từng cái"
+              side="bottom"
+            >
+              <button
+                onClick={async () => {
+                  if (!contoursData) return;
+                  const ids = contoursData.contours.map((c) => c.id);
+                  setSelectedQuadContourIds(ids);
 
-                for (const id of ids) {
-                  if (!quadPoints[id]) {
-                    try {
-                      const res = await fetch(`${API_URL}/get_quad_points`, {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ img: currentImage || selectedImage }),
-                      });
-                      if (res.ok) {
-                        const data = await res.json();
-                        const map: { [k: number]: Array<{ x: number; y: number }> } = {};
-                        for (const [k, v] of Object.entries(data.quadPoints)) {
-                          map[parseInt(k)] = v as Array<{ x: number; y: number }>;
+                  for (const id of ids) {
+                    if (!quadPoints[id]) {
+                      try {
+                        const res = await fetch(`${API_URL}/get_quad_points`, {
+                          method: 'POST',
+                          headers: { 'Content-Type': 'application/json' },
+                          body: JSON.stringify({ img: currentImage || selectedImage }),
+                        });
+                        if (res.ok) {
+                          const data = await res.json();
+                          const map: { [k: number]: Array<{ x: number; y: number }> } = {};
+                          for (const [k, v] of Object.entries(data.quadPoints)) {
+                            map[parseInt(k)] = v as Array<{ x: number; y: number }>;
+                          }
+                          setQuadPoints((prev) => ({ ...prev, ...map }));
                         }
-                        setQuadPoints((prev) => ({ ...prev, ...map }));
+                      } catch (err) {
+                        console.error('Error loading quad points:', err);
                       }
-                    } catch (err) {
-                      console.error('Error loading quad points:', err);
                     }
                   }
-                }
-              }}
-              className="px-2 py-1 text-[10px] bg-[#3a3a3a] rounded hover:bg-[#4a4a4a]"
-            >
-              Chọn tất cả
-            </button>
-            <button
-              onClick={() => setSelectedQuadContourIds([])}
-              className="px-2 py-1 text-[10px] bg-[#3a3a3a] rounded hover:bg-[#4a4a4a]"
-            >
-              Bỏ chọn tất cả
-            </button>
+                }}
+                className="px-2 py-1 text-[10px] bg-[#3a3a3a] rounded hover:bg-[#4a4a4a]"
+              >
+                Chọn tất cả
+              </button>
+            </Tooltip>
+            <Tooltip label="Bỏ tick toàn bộ contour trong danh sách" side="bottom">
+              <button
+                onClick={() => setSelectedQuadContourIds([])}
+                className="px-2 py-1 text-[10px] bg-[#3a3a3a] rounded hover:bg-[#4a4a4a]"
+              >
+                Bỏ chọn tất cả
+              </button>
+            </Tooltip>
           </div>
           <div className="max-h-48 overflow-y-auto bg-[#2a2a2a] rounded border border-[#3a3a3a]">
             {contoursData?.contours.map((contour) => {
@@ -160,16 +168,23 @@ export const QuadTransformSidebar: React.FC<QuadTransformSidebarProps> = ({
 
         {/* Add Point Mode Toggle */}
         <div className="mb-3 pb-3 border-b border-[#3a3a3a]">
-          <button
-            onClick={() => setAddPointMode(!addPointMode)}
-            className={`w-full px-3 py-2 rounded text-xs font-medium transition-colors ${
-              addPointMode
-                ? 'bg-yellow-600 hover:bg-yellow-700 text-white'
-                : 'bg-[#2a2a2a] hover:bg-[#3a3a3a] text-white border border-[#3a3a3a]'
-            }`}
+          <Tooltip
+            label="Khi BẬT: click vào cạnh tứ giác để chèn thêm 1 điểm tại vị trí click. Khi TẮT: có thể click cạnh để chọn / kéo cạnh."
+            side="left"
+            block
           >
-            {addPointMode ? '✓ Chế độ thêm điểm: BẬT' : '➕ Chế độ thêm điểm: TẮT'}
-          </button>
+            <button
+              onClick={() => setAddPointMode(!addPointMode)}
+              title="BẬT: click cạnh để thêm điểm mới. TẮT: click cạnh để chọn hoặc kéo cạnh."
+              className={`w-full px-3 py-2 rounded text-xs font-medium transition-colors ${
+                addPointMode
+                  ? 'bg-yellow-600 hover:bg-yellow-700 text-white'
+                  : 'bg-[#2a2a2a] hover:bg-[#3a3a3a] text-white border border-[#3a3a3a]'
+              }`}
+            >
+              {addPointMode ? '✓ Chế độ thêm điểm: BẬT' : '➕ Chế độ thêm điểm: TẮT'}
+            </button>
+          </Tooltip>
           {addPointMode ? (
             <div className="mt-2 text-xs text-[#aaa]">Click vào cạnh để thêm điểm mới</div>
           ) : (
@@ -186,16 +201,23 @@ export const QuadTransformSidebar: React.FC<QuadTransformSidebarProps> = ({
 
         {/* Chế độ chọn điểm + Spline */}
         <div className="mb-3 pb-3 border-b border-[#3a3a3a]">
-          <button
-            onClick={() => setPointSelectMode(!pointSelectMode)}
-            className={`w-full px-3 py-2 rounded text-xs font-medium transition-colors mb-2 ${
-              pointSelectMode
-                ? 'bg-green-600 hover:bg-green-700 text-white'
-                : 'bg-[#2a2a2a] hover:bg-[#3a3a3a] text-white border border-[#3a3a3a]'
-            }`}
+          <Tooltip
+            label="Khi BẬT: click 1 điểm sẽ tự chọn các điểm đối xứng qua Ox/Oy; điểm đã chọn hiển thị màu cyan. Hữu ích khi chỉnh điểm theo nhóm."
+            side="left"
+            block
           >
-            {pointSelectMode ? '✓ Chế độ chọn điểm: BẬT' : '🔘 Chế độ chọn điểm: TẮT'}
-          </button>
+            <button
+              onClick={() => setPointSelectMode(!pointSelectMode)}
+              title="BẬT: click 1 điểm để chọn nhóm điểm đối xứng qua Ox/Oy (màu cyan)."
+              className={`w-full px-3 py-2 rounded text-xs font-medium transition-colors mb-2 ${
+                pointSelectMode
+                  ? 'bg-green-600 hover:bg-green-700 text-white'
+                  : 'bg-[#2a2a2a] hover:bg-[#3a3a3a] text-white border border-[#3a3a3a]'
+              }`}
+            >
+              {pointSelectMode ? '✓ Chế độ chọn điểm: BẬT' : '🔘 Chế độ chọn điểm: TẮT'}
+            </button>
+          </Tooltip>
           {pointSelectMode && (
             <div className="mb-2 text-xs text-green-300">
               Click điểm → chọn các điểm đối xứng qua Ox/Oy (đã chọn: cyan)
@@ -239,23 +261,29 @@ export const QuadTransformSidebar: React.FC<QuadTransformSidebarProps> = ({
             </div>
           )}
           <div className="flex gap-2">
-            <button
-              onClick={onSplineClick}
-              disabled={
-                selectedQuadPoints.filter(
-                  (s) => s.contourId === selectedQuadContourIds[0],
-                ).length < 3
-              }
-              className={`flex-1 px-3 py-2 rounded text-xs font-medium transition-colors ${
-                selectedQuadPoints.filter(
-                  (s) => s.contourId === selectedQuadContourIds[0],
-                ).length >= 3
-                  ? 'bg-purple-600 hover:bg-purple-700 text-white'
-                  : 'bg-gray-600 text-gray-400 cursor-not-allowed'
-              }`}
+            <Tooltip
+              label="Vẽ đường spline (Catmull–Rom) đi qua các điểm đã chọn — cần ≥ 3 điểm trên contour đầu tiên trong danh sách"
+              side="top"
+              block
             >
-              📈 Spline
-            </button>
+              <button
+                onClick={onSplineClick}
+                disabled={
+                  selectedQuadPoints.filter(
+                    (s) => s.contourId === selectedQuadContourIds[0],
+                  ).length < 3
+                }
+                className={`w-full flex-1 px-3 py-2 rounded text-xs font-medium transition-colors ${
+                  selectedQuadPoints.filter(
+                    (s) => s.contourId === selectedQuadContourIds[0],
+                  ).length >= 3
+                    ? 'bg-purple-600 hover:bg-purple-700 text-white'
+                    : 'bg-gray-600 text-gray-400 cursor-not-allowed'
+                }`}
+              >
+                📈 Spline
+              </button>
+            </Tooltip>
           </div>
           {selectedQuadPoints.length > 0 &&
             selectedQuadPoints.filter(
@@ -423,23 +451,34 @@ export const QuadTransformSidebar: React.FC<QuadTransformSidebarProps> = ({
             );
           })()}
 
-        {/* Reset tứ giác về hình chữ nhật bao contour */}
+        {/* Reset polygon về bao quanh nhỏ nhất (Douglas-Peucker) */}
         <div className="mb-3 pb-3 border-b border-[#3a3a3a]">
-          <button
-            type="button"
-            onClick={onResetQuadToMinRect}
-            disabled={loading || selectedQuadContourIds.length === 0}
-            className={`w-full px-3 py-2 rounded text-xs font-medium transition-colors ${
-              selectedQuadContourIds.length === 0 || loading
-                ? 'bg-gray-600 cursor-not-allowed opacity-50 text-gray-400'
-                : 'bg-orange-700 hover:bg-orange-600 text-white'
-            }`}
-            title="Đặt lại 4 điểm tứ giác theo hình chữ nhật nhỏ nhất bao quanh contour (giống lúc mới vào Quad Transform)"
+          <Tooltip
+            label={
+              <span>
+                Reset polygon về đường bao nhỏ gọn theo <strong>Douglas-Peucker</strong>
+                (pipeline adaptive đang dùng khi lấy quad). Áp dụng cho contour đang tick.
+              </span>
+            }
+            side="left"
+            block
           >
-            {loading ? '⏳ …' : '↺ Reset tứ giác (min rect)'}
-          </button>
+            <button
+              type="button"
+              onClick={onResetQuadToMinRect}
+              disabled={loading || selectedQuadContourIds.length === 0}
+              title="Reset polygon theo Douglas-Peucker cho contour đang chọn; đồng thời xóa spline liên quan."
+              className={`w-full px-3 py-2 rounded text-xs font-medium transition-colors ${
+                selectedQuadContourIds.length === 0 || loading
+                  ? 'bg-gray-600 cursor-not-allowed opacity-50 text-gray-400'
+                  : 'bg-orange-700 hover:bg-orange-600 text-white'
+              }`}
+            >
+              {loading ? '⏳ …' : 'Reset polygon'}
+            </button>
+          </Tooltip>
           <p className="mt-1.5 text-[10px] text-[#888] leading-snug">
-            Áp dụng cho các contour đang tick: trả về đúng 4 góc của hình chữ nhật bao nhỏ nhất quanh viền contour; xóa trạng thái spline trên các contour đó.
+            Áp dụng cho contour đang tick: trả về polygon bao quanh nhỏ gọn theo Douglas-Peucker; xóa trạng thái spline trên contour đó.
           </p>
         </div>
 
@@ -456,24 +495,37 @@ export const QuadTransformSidebar: React.FC<QuadTransformSidebarProps> = ({
 
         {/* Action buttons */}
         <div className="space-y-2">
-          <button
-            onClick={onApplyTransform}
-            disabled={loading || selectedQuadContourIds.length === 0}
-            className={`w-full px-3 py-2 rounded text-xs font-bold transition-colors ${
-              selectedQuadContourIds.length === 0 || loading
-                ? 'bg-gray-600 cursor-not-allowed opacity-50'
-                : 'bg-green-600 hover:bg-green-700'
-            }`}
+          <Tooltip
+            label={
+              <span>
+                Tô trắng vùng bên trong các đa giác đã chỉnh, <strong>chỉ áp dụng cho contour đang tick</strong>.
+                Sau khi áp dụng có thể chọn đối xứng sang contour đối diện.
+              </span>
+            }
+            side="left"
+            block
           >
-            {loading ? '⏳ Transforming...' : '✨ Apply Transform'}
-          </button>
+            <button
+              onClick={onApplyTransform}
+              disabled={loading || selectedQuadContourIds.length === 0}
+              className={`w-full px-3 py-2 rounded text-xs font-bold transition-colors ${
+                selectedQuadContourIds.length === 0 || loading
+                  ? 'bg-gray-600 cursor-not-allowed opacity-50'
+                  : 'bg-green-600 hover:bg-green-700'
+              }`}
+            >
+              {loading ? '⏳ Transforming...' : '✨ Apply Transform'}
+            </button>
+          </Tooltip>
 
-          <button
-            onClick={onExitQuadMode}
-            className="w-full px-3 py-2 bg-red-600 rounded text-xs font-medium hover:bg-red-700 transition-colors"
-          >
-            ← Exit Mode
-          </button>
+          <Tooltip label="Thoát Quad Transform và quay lại panel TOOLS" side="left" block>
+            <button
+              onClick={onExitQuadMode}
+              className="w-full px-3 py-2 bg-red-600 rounded text-xs font-medium hover:bg-red-700 transition-colors"
+            >
+              ← Exit Mode
+            </button>
+          </Tooltip>
         </div>
       </div>
     </>
