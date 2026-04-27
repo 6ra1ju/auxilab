@@ -1,6 +1,7 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { FillContourSidebar } from './fill_contour';
 import { QuadTransformSidebar } from './quad_transform';
+import { Tooltip } from './tooltip';
 
 export type Tool =
   | 'sharpen'
@@ -41,6 +42,8 @@ export interface SelectedQuadPoint {
   contourId: number;
   pointIndex: number;
 }
+
+type ExportFormat = 'png' | 'jpg' | 'jpeg' | 'svg';
 
 // API base URL – ưu tiên cấu hình từ Vite, fallback về localhost:8000
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
@@ -356,6 +359,9 @@ const FillImage = () => {
 
   // Mô phỏng vật liệu xây dựng: lưới a x b
   const [showSimulateModal, setShowSimulateModal] = useState(false);
+  const [showExportModal, setShowExportModal] = useState(false);
+  const [exportFormat, setExportFormat] = useState<ExportFormat>('png');
+  const [exportFilename, setExportFilename] = useState('image-enhance');
   const [simulateGrid, setSimulateGrid] = useState<{ a: number; b: number } | null>(null);
   const [simulateInputA, setSimulateInputA] = useState<string>('2');
   const [simulateInputB, setSimulateInputB] = useState<string>('2');
@@ -621,6 +627,8 @@ const FillImage = () => {
       alert('Có lỗi xảy ra khi xử lý ảnh!');
     } finally {
       setLoading(false);
+      // Tool cơ bản chạy xong thì bỏ trạng thái active để tránh giữ màu hover.
+      setActiveTool(null);
     }
   };
 
@@ -1357,39 +1365,80 @@ const FillImage = () => {
     }
   };
 
-  /** Reset 4 điểm tứ giác về hình chữ nhật bao nhỏ nhất (minAreaRect) quanh contour — theo contour đã chọn */
+  /** Reset polygon theo contour MỚI nhất (re-detect từ ảnh hiện tại) rồi fit Douglas-Peucker */
   const handleResetQuadToMinRect = async () => {
-    if (!contoursData || selectedQuadContourIds.length === 0) {
+    if (selectedQuadContourIds.length === 0) {
       alert('Chọn ít nhất một contour trong danh sách để reset tứ giác.');
+      return;
+    }
+    if (!currentImage && !selectedImage) {
+      alert('Không có ảnh để reset.');
       return;
     }
 
     setLoading(true);
     try {
-      const updates: { [contourId: number]: Array<{ x: number; y: number }> } = {};
+      const workingImg = currentImage || selectedImage;
+      const refreshRes = await fetch(`${API_URL}/get_quad_points`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ img: workingImg }),
+      });
+      if (!refreshRes.ok) {
+        const errText = await refreshRes.text();
+        throw new Error(errText || 'Không lấy được contour mới để reset.');
+      }
+      const freshData = await refreshRes.json();
 
-      for (const cid of selectedQuadContourIds) {
-        const contour = contoursData.contours.find((c) => c.id === cid);
-        if (!contour || contour.points.length < 3) continue;
+      const freshContours: Contour[] = ((freshData.contours as Contour[] | undefined) ?? []).map((c) => ({
+        id: c.id,
+        points: c.points.map((p) => ({ x: p.x, y: p.y })),
+        area: c.area,
+        boundingBox: c.boundingBox,
+      }));
 
-        const response = await fetch(`${API_URL}/min_area_quad_from_points`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            points: contour.points.map((p) => ({
-              x: Math.round(p.x),
-              y: Math.round(p.y),
-            })),
-          }),
-        });
+      // Map contour cũ đã chọn -> contour mới gần nhất theo centroid
+      const centroid = (pts: ContourPoint[]) => {
+        const n = Math.max(pts.length, 1);
+        const sx = pts.reduce((acc, p) => acc + p.x, 0);
+        const sy = pts.reduce((acc, p) => acc + p.y, 0);
+        return { x: sx / n, y: sy / n };
+      };
+      const freshCentroids = freshContours.map((c) => ({ id: c.id, c: centroid(c.points) }));
 
-        if (!response.ok) {
-          const errText = await response.text();
-          throw new Error(errText || `Lỗi reset contour ${cid + 1}`);
+      const oldSelectedContours =
+        contoursData?.contours.filter((c) => selectedQuadContourIds.includes(c.id)) ?? [];
+      const mappedFreshIds = new Set<number>();
+
+      for (const oldContour of oldSelectedContours) {
+        const oldCenter = centroid(oldContour.points);
+        let bestId: number | null = null;
+        let bestDist = Number.POSITIVE_INFINITY;
+        for (const fc of freshCentroids) {
+          const dx = fc.c.x - oldCenter.x;
+          const dy = fc.c.y - oldCenter.y;
+          const d2 = dx * dx + dy * dy;
+          if (d2 < bestDist) {
+            bestDist = d2;
+            bestId = fc.id;
+          }
         }
+        if (bestId !== null) mappedFreshIds.add(bestId);
+      }
 
-        const data = (await response.json()) as { quad: Array<{ x: number; y: number }> };
-        updates[cid] = data.quad.map((p) => ({ x: p.x, y: p.y }));
+      // Fallback: nếu chưa map được (không có contoursData cũ), dùng id hiện tại nếu tồn tại
+      if (mappedFreshIds.size === 0) {
+        for (const id of selectedQuadContourIds) {
+          if (freshContours.some((c) => c.id === id)) mappedFreshIds.add(id);
+        }
+      }
+
+      const updates: { [contourId: number]: Array<{ x: number; y: number }> } = {};
+      for (const freshId of mappedFreshIds) {
+        const poly = (freshData.quadPoints?.[String(freshId)] as Array<{ x: number; y: number }> | undefined) ?? [];
+        if (poly.length >= 3) {
+          updates[freshId] = poly.map((p) => ({ x: p.x, y: p.y }));
+        }
       }
 
       if (Object.keys(updates).length === 0) {
@@ -1397,6 +1446,15 @@ const FillImage = () => {
         return;
       }
 
+      // Cập nhật contour mới vào state trước, để thao tác tiếp theo bám contour mới.
+      if (freshContours.length > 0) {
+        setContoursData({
+          contours: freshContours,
+          previewImg: freshData.previewImg,
+          originalImg: freshData.originalImg || workingImg,
+        });
+      }
+      setSelectedQuadContourIds(Array.from(mappedFreshIds));
       setQuadPoints((prev) => ({ ...prev, ...updates }));
 
       setSplineControlPointsByContour((prev) => {
@@ -1879,6 +1937,154 @@ const FillImage = () => {
 
   // Mở modal mô phỏng
   const handleOpenSimulate = () => setShowSimulateModal(true);
+  const handleOpenExport = () => {
+    if (!currentImage && !selectedImage) {
+      alert('Vui lòng mở ảnh trước khi lưu.');
+      return;
+    }
+    setShowExportModal(true);
+  };
+
+  const sanitizeFilename = (raw: string) => {
+    const cleaned = raw
+      .trim()
+      .replace(/[\\/:*?"<>|]/g, '-')
+      .replace(/\s+/g, '-')
+      .replace(/-+/g, '-')
+      .replace(/^-|-$/g, '');
+    return cleaned || 'image-enhance';
+  };
+
+  const triggerDownload = (href: string, filename: string) => {
+    const a = document.createElement('a');
+    a.href = href;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  };
+
+  const loadImageElement = (src: string): Promise<HTMLImageElement> =>
+    new Promise((resolve, reject) => {
+      const img = new Image();
+      img.onload = () => resolve(img);
+      img.onerror = () => reject(new Error('Không thể đọc ảnh để xuất.'));
+      img.src = src;
+    });
+
+  const exportRasterImage = async (src: string, format: Extract<ExportFormat, 'png' | 'jpg' | 'jpeg'>, filename: string) => {
+    const img = await loadImageElement(src);
+    const canvas = document.createElement('canvas');
+    canvas.width = img.width;
+    canvas.height = img.height;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) throw new Error('Không khởi tạo được canvas để xuất ảnh.');
+
+    if (format === 'jpg' || format === 'jpeg') {
+      ctx.fillStyle = '#000000';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.drawImage(img, 0, 0);
+      triggerDownload(canvas.toDataURL('image/jpeg', 0.95), `${filename}.jpg`);
+      return;
+    }
+
+    // PNG
+    ctx.drawImage(img, 0, 0);
+    triggerDownload(canvas.toDataURL('image/png'), `${filename}.png`);
+  };
+
+  const exportAsSvg = async (src: string, filename: string) => {
+    let contoursForSvg: Contour[] | null = null;
+    if (contoursData && contoursData.contours.length > 0 && contoursData.originalImg === src) {
+      contoursForSvg = contoursData.contours;
+    } else {
+      const res = await fetch(`${API_URL}/get_contours`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ img: src }),
+      });
+      if (!res.ok) {
+        const errText = await res.text();
+        throw new Error(errText || 'Không lấy được contour để xuất SVG.');
+      }
+      const data = (await res.json()) as ContoursData;
+      contoursForSvg = data.contours;
+    }
+
+    const img = await loadImageElement(src);
+    const W = img.width;
+    const H = img.height;
+    // Đổi polygon thô -> path đã lọc/simplify để tăng tương thích với editor vector.
+    const makePathD = (pts: ContourPoint[]) => {
+      if (pts.length < 3) return '';
+      const cleaned: Array<{ x: number; y: number }> = [];
+      for (const p of pts) {
+        const x = Math.max(0, Math.min(W, Math.round(p.x)));
+        const y = Math.max(0, Math.min(H, Math.round(p.y)));
+        if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+        const prev = cleaned[cleaned.length - 1];
+        if (!prev || prev.x !== x || prev.y !== y) cleaned.push({ x, y });
+      }
+      if (cleaned.length < 3) return '';
+
+      // Simplify nhẹ bằng lấy mẫu đều để tránh path quá nặng (Vectornator dễ fail với contour quá dày).
+      const MAX_POINTS = 240;
+      let sampled = cleaned;
+      if (cleaned.length > MAX_POINTS) {
+        sampled = [];
+        for (let i = 0; i < MAX_POINTS; i++) {
+          const idx = Math.round((i * (cleaned.length - 1)) / (MAX_POINTS - 1));
+          sampled.push(cleaned[idx]);
+        }
+      }
+      if (sampled.length < 3) return '';
+      const first = sampled[0];
+      const rest = sampled.slice(1).map((p) => `L ${p.x} ${p.y}`).join(' ');
+      return `M ${first.x} ${first.y} ${rest} Z`;
+    };
+
+    const paths = (contoursForSvg ?? [])
+      .map((c) => makePathD(c.points))
+      .filter((d) => d.length > 0)
+      .map((d) => `<path d="${d}" fill="#ffffff" stroke="none" />`)
+      .join('\n');
+
+    const svg = [
+      `<?xml version="1.0" encoding="UTF-8"?>`,
+      `<svg xmlns="http://www.w3.org/2000/svg" version="1.1" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">`,
+      `<rect x="0" y="0" width="${W}" height="${H}" fill="#000000" />`,
+      paths,
+      `</svg>`,
+    ].join('\n');
+
+    const blob = new Blob([svg], { type: 'image/svg+xml;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    try {
+      triggerDownload(url, `${filename}.svg`);
+    } finally {
+      URL.revokeObjectURL(url);
+    }
+  };
+
+  const handleConfirmExport = async () => {
+    const src = currentImage || selectedImage;
+    if (!src) return;
+    const filename = sanitizeFilename(exportFilename);
+    setLoading(true);
+    try {
+      if (exportFormat === 'svg') {
+        await exportAsSvg(src, filename);
+      } else {
+        await exportRasterImage(src, exportFormat, filename);
+      }
+      setShowExportModal(false);
+    } catch (error) {
+      console.error('Export error:', error);
+      alert(error instanceof Error ? error.message : 'Không thể xuất file.');
+    } finally {
+      setLoading(false);
+    }
+  };
 
   // Xác nhận mô phỏng a x b
   const handleConfirmSimulate = () => {
@@ -1957,8 +2163,8 @@ const FillImage = () => {
     { id: 'saturation', name: 'Saturation', icon: '🎨', description: 'Điều chỉnh độ bão hòa màu' },
     { id: 'fill_min', name: 'Fill Min', icon: '⬇️', description: 'Đối xứng ảnh (min)' },
     { id: 'fill_max', name: 'Fill Max', icon: '⬆️', description: 'Đối xứng ảnh (max)' },
-    { id: 'get_contours', name: 'Fill Contours', icon: '🎯', description: 'Click để fill contours', isSpecial: true },
-    { id: 'quad_transform', name: 'Quad Transform', icon: '⬜', description: 'Kéo thả đỉnh tứ giác', isSpecial: true },
+    { id: 'get_contours', name: 'Fill Contours', icon: '🎯', description: 'Tô màu contour đã chọn', isSpecial: true },
+    { id: 'quad_transform', name: 'Quad Transform', icon: '⬜', description: 'Chỉnh sửa hình dạng contour', isSpecial: true },
     {
       id: 'cut_stretch',
       name: 'Cắt & kéo giãn',
@@ -1974,73 +2180,105 @@ const FillImage = () => {
       <div className="flex items-center justify-between px-4 py-2 bg-[#1e1e1e] border-b border-[#3a3a3a] h-[50px] min-h-[50px] shrink-0">
         {/* Left buttons */}
         <div className="flex gap-1.5">
-          <button 
-            onClick={handleClearImage}
-            disabled={!selectedImage}
-            className={`w-8 h-8 bg-[#2a2a2a] rounded-md text-white text-sm flex items-center justify-center transition-colors ${
-              selectedImage ? 'cursor-pointer hover:bg-red-600' : 'cursor-not-allowed opacity-50'
-            }`}
-            title="Clear image"
-          >
-            ✕
-          </button>
-          <button 
-            onClick={handleGoBack}
-            disabled={historyIndex <= 0}
-            className={`w-8 h-8 bg-[#2a2a2a] rounded-md text-white text-sm flex items-center justify-center transition-colors ${
-              historyIndex > 0 ? 'cursor-pointer hover:bg-[#3a3a3a]' : 'cursor-not-allowed opacity-50'
-            }`}
-            title="Undo"
-          >
-            ‹
-          </button>
-          <button 
-            onClick={handleGoForward}
-            disabled={historyIndex >= history.length - 1}
-            className={`w-8 h-8 bg-[#2a2a2a] rounded-md text-white text-sm flex items-center justify-center transition-colors ${
-              historyIndex < history.length - 1 ? 'cursor-pointer hover:bg-[#3a3a3a]' : 'cursor-not-allowed opacity-50'
-            }`}
-            title="Redo"
-          >
-            ›
-          </button>
+          <Tooltip label="Xóa ảnh và làm mới phiên (đặt lại lịch sử)" side="bottom">
+            <button
+              onClick={handleClearImage}
+              disabled={!selectedImage}
+              aria-label="Xóa ảnh"
+              className={`w-8 h-8 bg-[#2a2a2a] rounded-md text-white text-sm flex items-center justify-center transition-colors ${
+                selectedImage ? 'cursor-pointer hover:bg-red-600' : 'cursor-not-allowed opacity-50'
+              }`}
+            >
+              ✕
+            </button>
+          </Tooltip>
+          <Tooltip label="Hoàn tác về bản chỉnh sửa trước (Undo)" side="bottom">
+            <button
+              onClick={handleGoBack}
+              disabled={historyIndex <= 0}
+              aria-label="Hoàn tác (Undo)"
+              className={`w-8 h-8 bg-[#2a2a2a] rounded-md text-white text-sm flex items-center justify-center transition-colors ${
+                historyIndex > 0 ? 'cursor-pointer hover:bg-[#3a3a3a]' : 'cursor-not-allowed opacity-50'
+              }`}
+            >
+              ‹
+            </button>
+          </Tooltip>
+          <Tooltip label="Làm lại bản chỉnh sửa kế tiếp (Redo)" side="bottom">
+            <button
+              onClick={handleGoForward}
+              disabled={historyIndex >= history.length - 1}
+              aria-label="Làm lại (Redo)"
+              className={`w-8 h-8 bg-[#2a2a2a] rounded-md text-white text-sm flex items-center justify-center transition-colors ${
+                historyIndex < history.length - 1 ? 'cursor-pointer hover:bg-[#3a3a3a]' : 'cursor-not-allowed opacity-50'
+              }`}
+            >
+              ›
+            </button>
+          </Tooltip>
         </div>
-        
+
         {/* Center buttons */}
         <div className="flex gap-2.5">
-          <button 
-            onClick={() => fileInputRef.current?.click()}
-            className="px-3.5 py-1.5 bg-primary rounded-md text-white cursor-pointer text-sm font-medium transition-all hover:bg-[#5558dd]"
-          >
-            📁 OPEN
-          </button>
-          <button 
-            className={`px-3.5 py-1.5 rounded-md text-white cursor-pointer text-sm font-medium transition-all ${
-              activeTool ? 'bg-secondary hover:bg-[#4aa8cc]' : 'bg-[#4a4a4a] hover:bg-[#5a5a5a]'
-            }`}
-          >
-            🛠 TOOLS
-          </button>
+          <Tooltip label="Mở ảnh từ máy (PNG/JPG); ảnh sẽ được chuẩn hóa nhị phân trước khi xử lý" side="bottom">
+            <button
+              onClick={() => fileInputRef.current?.click()}
+              className="px-3.5 py-1.5 bg-primary rounded-md text-white cursor-pointer text-sm font-medium transition-all hover:bg-[#5558dd]"
+            >
+              📁 OPEN
+            </button>
+          </Tooltip>
+          <Tooltip label="Bảng công cụ xử lý ảnh đang ở sidebar bên phải" side="bottom">
+            <button
+              className={`px-3.5 py-1.5 rounded-md text-white cursor-pointer text-sm font-medium transition-all ${
+                activeTool ? 'bg-secondary hover:bg-[#4aa8cc]' : 'bg-[#4a4a4a] hover:bg-[#5a5a5a]'
+              }`}
+            >
+              🛠 TOOLS
+            </button>
+          </Tooltip>
         </div>
 
         {/* Right buttons */}
         <div className="flex gap-2">
-          <button
-            onClick={handleOpenSimulate}
-            disabled={!selectedImage}
-            className={`px-3 py-1.5 rounded-md text-sm font-medium transition-colors flex items-center gap-1.5 ${
-              selectedImage ? 'bg-amber-600 hover:bg-amber-700 text-white cursor-pointer' : 'bg-[#2a2a2a] opacity-50 cursor-not-allowed text-white'
-            }`}
-            title="Mô phỏng vật liệu dạng lưới a x b"
+          <Tooltip
+            label="Mô phỏng vật liệu lưới a × b: tô vùng đen bằng màu vật liệu rồi xem trước"
+            side="bottom"
           >
-            📐 Mô phỏng
-          </button>
-          <button className="w-8 h-8 bg-[#2a2a2a] rounded-md text-white cursor-pointer text-sm flex items-center justify-center hover:bg-[#3a3a3a] transition-colors">
-            💾
-          </button>
-          <button className="w-8 h-8 bg-[#2a2a2a] rounded-md text-white cursor-pointer text-sm flex items-center justify-center hover:bg-[#3a3a3a] transition-colors">
-            ⋯
-          </button>
+            <button
+              onClick={handleOpenSimulate}
+              disabled={!selectedImage}
+              className={`px-3 py-1.5 rounded-md text-sm font-medium transition-colors flex items-center gap-1.5 ${
+                selectedImage ? 'bg-amber-600 hover:bg-amber-700 text-white cursor-pointer' : 'bg-[#2a2a2a] opacity-50 cursor-not-allowed text-white'
+              }`}
+            >
+              📐 Mô phỏng
+            </button>
+          </Tooltip>
+          <Tooltip label="Lưu ảnh đã chỉnh sửa: PNG, JPG/JPEG hoặc SVG" side="bottom">
+            <button
+              type="button"
+              aria-label="Lưu"
+              onClick={handleOpenExport}
+              disabled={!selectedImage || loading}
+              className={`w-8 h-8 rounded-md text-white text-sm flex items-center justify-center transition-colors ${
+                selectedImage && !loading
+                  ? 'bg-[#2a2a2a] cursor-pointer hover:bg-[#3a3a3a]'
+                  : 'bg-[#2a2a2a] opacity-50 cursor-not-allowed'
+              }`}
+            >
+              💾
+            </button>
+          </Tooltip>
+          <Tooltip label="Tùy chọn khác" side="bottom">
+            <button
+              type="button"
+              aria-label="Tùy chọn"
+              className="w-8 h-8 bg-[#2a2a2a] rounded-md text-white cursor-pointer text-sm flex items-center justify-center hover:bg-[#3a3a3a] transition-colors"
+            >
+              ⋯
+            </button>
+          </Tooltip>
         </div>
       </div>
 
@@ -2121,6 +2359,83 @@ const FillImage = () => {
                 className="px-4 py-2 bg-amber-600 rounded text-sm font-medium hover:bg-amber-700 transition-colors"
               >
                 Xem
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal lưu ảnh */}
+      {showExportModal && (
+        <div
+          className="fixed inset-0 z-[60] flex items-center justify-center bg-black/70 p-4"
+          onClick={() => !loading && setShowExportModal(false)}
+        >
+          <div
+            className="w-full max-w-md rounded-lg border border-[#3a3a3a] bg-[#2a2a2a] p-5 shadow-xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h3 className="mb-3 text-lg font-semibold text-white">Lưu ảnh đã chỉnh sửa</h3>
+            <div className="mb-3">
+              <label className="mb-1 block text-xs font-medium text-[#aaa]">Tên file</label>
+              <input
+                type="text"
+                value={exportFilename}
+                onChange={(e) => setExportFilename(e.target.value)}
+                className="w-full rounded border border-[#3a3a3a] bg-[#1e1e1e] px-3 py-2 text-sm text-white"
+                placeholder="image-enhance"
+              />
+            </div>
+
+            <div className="mb-4 rounded border border-[#3a3a3a] bg-[#1e1e1e] p-3">
+              <div className="mb-2 text-xs font-medium text-[#aaa]">Định dạng xuất</div>
+              <div className="space-y-2 text-sm text-[#ddd]">
+                <label className="flex cursor-pointer items-center gap-2">
+                  <input
+                    type="radio"
+                    name="exportFormat"
+                    checked={exportFormat === 'png'}
+                    onChange={() => setExportFormat('png')}
+                  />
+                  PNG (raster, không mất dữ liệu)
+                </label>
+                <label className="flex cursor-pointer items-center gap-2">
+                  <input
+                    type="radio"
+                    name="exportFormat"
+                    checked={exportFormat === 'jpg' || exportFormat === 'jpeg'}
+                    onChange={() => setExportFormat('jpg')}
+                  />
+                  JPG / JPEG (raster, dung lượng nhỏ)
+                </label>
+                <label className="flex cursor-pointer items-center gap-2">
+                  <input
+                    type="radio"
+                    name="exportFormat"
+                    checked={exportFormat === 'svg'}
+                    onChange={() => setExportFormat('svg')}
+                  />
+                  SVG (vector từ contour hiện tại)
+                </label>
+              </div>
+            </div>
+
+            <div className="flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setShowExportModal(false)}
+                disabled={loading}
+                className="rounded bg-[#3a3a3a] px-4 py-2 text-sm text-white hover:bg-[#4a4a4a] disabled:opacity-50"
+              >
+                Hủy
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleConfirmExport()}
+                disabled={loading || !selectedImage}
+                className="rounded bg-cyan-700 px-4 py-2 text-sm font-medium text-white hover:bg-cyan-600 disabled:opacity-50"
+              >
+                {loading ? '⏳ Đang xuất...' : 'Tải xuống'}
               </button>
             </div>
           </div>
@@ -2296,33 +2611,39 @@ const FillImage = () => {
           {/* Phóng to / thu nhỏ ảnh chính */}
           {(processedImage || selectedImage) && !simulateGrid && (
             <div className="absolute top-2 right-2 z-30 flex flex-wrap items-center justify-end gap-1 rounded-lg border border-[#3a3a3a] bg-[#1e1e1e]/95 px-2 py-1.5 shadow-lg backdrop-blur-sm">
-              <button
-                type="button"
-                title="Thu nhỏ"
-                onClick={() => setCanvasZoom((z) => clampCanvasZoom(z / 1.2))}
-                className="flex h-7 w-7 items-center justify-center rounded bg-[#2a2a2a] text-lg font-semibold text-white hover:bg-[#3a3a3a]"
-              >
-                −
-              </button>
+              <Tooltip label="Thu nhỏ vùng xem (−20%)" side="bottom">
+                <button
+                  type="button"
+                  aria-label="Thu nhỏ"
+                  onClick={() => setCanvasZoom((z) => clampCanvasZoom(z / 1.2))}
+                  className="flex h-7 w-7 items-center justify-center rounded bg-[#2a2a2a] text-lg font-semibold text-white hover:bg-[#3a3a3a]"
+                >
+                  −
+                </button>
+              </Tooltip>
               <span className="min-w-[3rem] text-center text-[11px] font-mono text-[#ccc]">
                 {Math.round(canvasZoom * 100)}%
               </span>
-              <button
-                type="button"
-                title="Phóng to"
-                onClick={() => setCanvasZoom((z) => clampCanvasZoom(z * 1.2))}
-                className="flex h-7 w-7 items-center justify-center rounded bg-[#2a2a2a] text-lg font-semibold text-white hover:bg-[#3a3a3a]"
-              >
-                +
-              </button>
-              <button
-                type="button"
-                title="Đặt lại 100%"
-                onClick={() => setCanvasZoom(1)}
-                className="rounded bg-[#2a2a2a] px-2 py-1 text-[10px] font-medium text-[#aaa] hover:bg-[#3a3a3a] hover:text-white"
-              >
-                Reset
-              </button>
+              <Tooltip label="Phóng to vùng xem (+20%)" side="bottom">
+                <button
+                  type="button"
+                  aria-label="Phóng to"
+                  onClick={() => setCanvasZoom((z) => clampCanvasZoom(z * 1.2))}
+                  className="flex h-7 w-7 items-center justify-center rounded bg-[#2a2a2a] text-lg font-semibold text-white hover:bg-[#3a3a3a]"
+                >
+                  +
+                </button>
+              </Tooltip>
+              <Tooltip label="Đặt lại mức zoom về 100%" side="bottom">
+                <button
+                  type="button"
+                  aria-label="Đặt lại zoom"
+                  onClick={() => setCanvasZoom(1)}
+                  className="rounded bg-[#2a2a2a] px-2 py-1 text-[10px] font-medium text-[#aaa] hover:bg-[#3a3a3a] hover:text-white"
+                >
+                  Reset
+                </button>
+              </Tooltip>
             </div>
           )}
 
@@ -2820,22 +3141,36 @@ const FillImage = () => {
                   )}
                 </div>
                 <div className="flex flex-col gap-2 pt-2">
-                  <button
-                    type="button"
-                    disabled={loading || !cutStretchCut}
-                    onClick={() => void handleApplyCutStretch()}
-                    className="rounded bg-cyan-700 px-4 py-2.5 text-sm font-medium text-white hover:bg-cyan-600 disabled:cursor-not-allowed disabled:opacity-50"
+                  <Tooltip
+                    label={
+                      <span>
+                        Chèn <strong>{cutStretchInsertPx}px</strong> tại đường cắt; vùng chèn được{' '}
+                        {cutStretchFillMode === 'extrude' ? 'lặp pixel ở mép cắt' : 'tô bằng màu đặc'}.
+                        Cần vẽ đường cắt trên ảnh trước khi áp dụng.
+                      </span>
+                    }
+                    side="left"
+                    block
                   >
-                    Áp dụng lên ảnh
-                  </button>
-                  <button
-                    type="button"
-                    disabled={loading}
-                    onClick={handleExitCutStretch}
-                    className="rounded border border-[#555] px-4 py-2 text-sm text-[#ccc] hover:bg-[#3a3a3a]"
-                  >
-                    Thoát
-                  </button>
+                    <button
+                      type="button"
+                      disabled={loading || !cutStretchCut}
+                      onClick={() => void handleApplyCutStretch()}
+                      className="w-full rounded bg-cyan-700 px-4 py-2.5 text-sm font-medium text-white hover:bg-cyan-600 disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      Áp dụng lên ảnh
+                    </button>
+                  </Tooltip>
+                  <Tooltip label="Thoát chế độ Cắt & kéo giãn (không lưu thay đổi)" side="left" block>
+                    <button
+                      type="button"
+                      disabled={loading}
+                      onClick={handleExitCutStretch}
+                      className="w-full rounded border border-[#555] px-4 py-2 text-sm text-[#ccc] hover:bg-[#3a3a3a]"
+                    >
+                      Thoát
+                    </button>
+                  </Tooltip>
                 </div>
               </div>
             </div>
@@ -2893,32 +3228,46 @@ const FillImage = () => {
                         : tool.id === 'cut_stretch'
                           ? handleEnterCutStretch
                           : () => handleProcessImage(tool.id);
-                  
+
                   return (
-                    <button
+                    <Tooltip
                       key={tool.id}
-                      onClick={handleClick}
-                      disabled={loading || !selectedImage}
-                      className={`
-                        w-full flex items-center gap-2.5 p-3 mb-1.5 rounded-md text-white transition-all text-left
-                        ${activeTool === tool.id ? 'bg-secondary' : 'bg-[#2a2a2a]'}
-                        ${!selectedImage || loading ? 'cursor-not-allowed opacity-50' : 'cursor-pointer hover:bg-[#3a3a3a]'}
-                        ${activeTool === tool.id && 'hover:bg-secondary'}
-                      `}
+                      label={
+                        <span className="flex flex-col gap-0.5">
+                          <span className="font-semibold text-white">{tool.name}</span>
+                          <span className="text-[10px] text-[#cfcfcf]">
+                            {tool.description}
+                          </span>
+                          {!selectedImage && (
+                            <span className="text-[10px] text-amber-300">
+                              Cần mở ảnh trước khi dùng công cụ này
+                            </span>
+                          )}
+                        </span>
+                      }
+                      side="left"
+                      block
                     >
-                      <div className="text-xl">{tool.icon}</div>
-                      <div className="flex-1">
-                        <div className="font-medium mb-0.5 text-sm">
-                          {tool.name}
+                      <button
+                        onClick={handleClick}
+                        disabled={loading || !selectedImage}
+                        className={`
+                          w-full flex items-center gap-2.5 p-3 mb-1.5 rounded-md text-white transition-all text-left
+                          ${activeTool === tool.id ? 'bg-secondary' : 'bg-[#2a2a2a]'}
+                          ${!selectedImage || loading ? 'cursor-not-allowed opacity-50' : 'cursor-pointer hover:bg-[#3a3a3a]'}
+                          ${activeTool === tool.id && 'hover:bg-secondary'}
+                        `}
+                      >
+                        <div className="text-xl">{tool.icon}</div>
+                        <div className="flex-1">
+                          <div className="font-medium mb-0.5 text-sm">{tool.name}</div>
+                          <div className="text-[11px] text-[#aaa]">{tool.description}</div>
                         </div>
-                        <div className="text-[11px] text-[#aaa]">
-                          {tool.description}
-                        </div>
-                      </div>
-                      {loading && activeTool === tool.id && (
-                        <div className="text-sm animate-spin-slow">⏳</div>
-                      )}
-                    </button>
+                        {loading && activeTool === tool.id && (
+                          <div className="text-sm animate-spin-slow">⏳</div>
+                        )}
+                      </button>
+                    </Tooltip>
                   );
                 })}
               </div>

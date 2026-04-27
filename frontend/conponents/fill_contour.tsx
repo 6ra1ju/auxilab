@@ -1,5 +1,6 @@
 import React from 'react';
 import type { ContoursData } from './fill_img';
+import { Tooltip } from './tooltip';
 
 interface FillContourSidebarProps {
   contoursData: ContoursData;
@@ -40,54 +41,76 @@ export const FillContourSidebar: React.FC<FillContourSidebarProps> = ({
         {/* Color picker */}
         <div className="flex items-center gap-2 mb-3 pb-3 border-b border-[#3a3a3a]">
           <label className="text-xs font-medium">Fill Color:</label>
-          <input
-            type="color"
-            value={fillColor}
-            onChange={(e) => onChangeFillColor(e.target.value)}
-            className="w-12 h-8 rounded cursor-pointer border-0"
-          />
+          <Tooltip label="Chọn màu sẽ tô vào contour đã chọn" side="bottom">
+            <input
+              type="color"
+              value={fillColor}
+              onChange={(e) => onChangeFillColor(e.target.value)}
+              aria-label="Màu tô contour"
+              className="w-12 h-8 rounded cursor-pointer border-0"
+            />
+          </Tooltip>
           <span className="text-xs text-[#aaa]">{fillColor}</span>
         </div>
 
         {/* Action buttons */}
         <div className="space-y-2">
-          <button
-            onClick={onSelectAll}
-            className="w-full px-3 py-2 bg-[#2a2a2a] rounded text-xs font-medium hover:bg-[#3a3a3a] transition-colors"
-          >
-            ✓ Select All
-          </button>
+          <Tooltip label="Chọn toàn bộ contour đang nhận diện" side="left" block>
+            <button
+              onClick={onSelectAll}
+              className="w-full px-3 py-2 bg-[#2a2a2a] rounded text-xs font-medium hover:bg-[#3a3a3a] transition-colors"
+            >
+              ✓ Select All
+            </button>
+          </Tooltip>
 
-          <button
-            onClick={onDeselectAll}
-            disabled={selectedContourIds.length === 0}
-            className={`w-full px-3 py-2 bg-[#2a2a2a] rounded text-xs font-medium transition-colors ${
-              selectedContourIds.length === 0 ? 'opacity-50 cursor-not-allowed' : 'hover:bg-[#3a3a3a]'
-            }`}
-          >
-            ✗ Deselect All
-          </button>
+          <Tooltip label="Bỏ chọn toàn bộ contour" side="left" block>
+            <button
+              onClick={onDeselectAll}
+              disabled={selectedContourIds.length === 0}
+              className={`w-full px-3 py-2 bg-[#2a2a2a] rounded text-xs font-medium transition-colors ${
+                selectedContourIds.length === 0 ? 'opacity-50 cursor-not-allowed' : 'hover:bg-[#3a3a3a]'
+              }`}
+            >
+              ✗ Deselect All
+            </button>
+          </Tooltip>
 
-          <button
-            onClick={onFillSelectedContours}
-            disabled={loading || selectedContourIds.length === 0}
-            className={`w-full px-3 py-2 rounded text-xs font-bold transition-colors ${
-              selectedContourIds.length === 0 || loading
-                ? 'bg-gray-600 cursor-not-allowed opacity-50'
-                : 'bg-green-600 hover:bg-green-700'
-            }`}
+          <Tooltip
+            label={
+              <span>
+                Tô màu vào các contour đang chọn theo <strong>Fill Color</strong>.{' '}
+                {selectedContourIds.length === 0
+                  ? 'Hãy chọn ít nhất 1 contour.'
+                  : `Đang chọn: ${selectedContourIds.length}.`}
+              </span>
+            }
+            side="left"
+            block
           >
-            {loading
-              ? '⏳ Filling...'
-              : `🎨 Fill ${selectedContourIds.length} Contour${selectedContourIds.length !== 1 ? 's' : ''}`}
-          </button>
+            <button
+              onClick={onFillSelectedContours}
+              disabled={loading || selectedContourIds.length === 0}
+              className={`w-full px-3 py-2 rounded text-xs font-bold transition-colors ${
+                selectedContourIds.length === 0 || loading
+                  ? 'bg-gray-600 cursor-not-allowed opacity-50'
+                  : 'bg-green-600 hover:bg-green-700'
+              }`}
+            >
+              {loading
+                ? '⏳ Filling...'
+                : `🎨 Fill ${selectedContourIds.length} Contour${selectedContourIds.length !== 1 ? 's' : ''}`}
+            </button>
+          </Tooltip>
 
-          <button
-            onClick={onExitContourMode}
-            className="w-full px-3 py-2 bg-red-600 rounded text-xs font-medium hover:bg-red-700 transition-colors"
-          >
-            ← Exit Mode
-          </button>
+          <Tooltip label="Thoát Contour Mode và quay lại panel TOOLS" side="left" block>
+            <button
+              onClick={onExitContourMode}
+              className="w-full px-3 py-2 bg-red-600 rounded text-xs font-medium hover:bg-red-700 transition-colors"
+            >
+              ← Exit Mode
+            </button>
+          </Tooltip>
         </div>
       </div>
     </>
