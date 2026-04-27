@@ -2163,8 +2163,8 @@ const FillImage = () => {
     { id: 'saturation', name: 'Saturation', icon: '🎨', description: 'Điều chỉnh độ bão hòa màu' },
     { id: 'fill_min', name: 'Fill Min', icon: '⬇️', description: 'Đối xứng ảnh (min)' },
     { id: 'fill_max', name: 'Fill Max', icon: '⬆️', description: 'Đối xứng ảnh (max)' },
-    { id: 'get_contours', name: 'Fill Contours', icon: '🎯', description: 'Click để fill contours', isSpecial: true },
-    { id: 'quad_transform', name: 'Quad Transform', icon: '⬜', description: 'Kéo thả đỉnh tứ giác', isSpecial: true },
+    { id: 'get_contours', name: 'Fill Contours', icon: '🎯', description: 'Tô màu contour đã chọn', isSpecial: true },
+    { id: 'quad_transform', name: 'Quad Transform', icon: '⬜', description: 'Chỉnh sửa hình dạng contour', isSpecial: true },
     {
       id: 'cut_stretch',
       name: 'Cắt & kéo giãn',

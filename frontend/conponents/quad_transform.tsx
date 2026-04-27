@@ -175,7 +175,7 @@ export const QuadTransformSidebar: React.FC<QuadTransformSidebarProps> = ({
           >
             <button
               onClick={() => setAddPointMode(!addPointMode)}
-              title="BẬT: click cạnh để thêm điểm mới. TẮT: click cạnh để chọn hoặc kéo cạnh."
+              title="BẬT: click một vị trí trên cạnh để thêm điểm mới. TẮT: click cạnh để chọn hoặc kéo cạnh."
               className={`w-full px-3 py-2 rounded text-xs font-medium transition-colors ${
                 addPointMode
                   ? 'bg-yellow-600 hover:bg-yellow-700 text-white'
@@ -208,7 +208,7 @@ export const QuadTransformSidebar: React.FC<QuadTransformSidebarProps> = ({
           >
             <button
               onClick={() => setPointSelectMode(!pointSelectMode)}
-              title="BẬT: click 1 điểm để chọn nhóm điểm đối xứng qua Ox/Oy (màu cyan)."
+              title="BẬT: click một điểm để chọn điểm (hoặc nhóm điểm đối xứng qua Ox/Oy - màu cyan)."
               className={`w-full px-3 py-2 rounded text-xs font-medium transition-colors mb-2 ${
                 pointSelectMode
                   ? 'bg-green-600 hover:bg-green-700 text-white'
@@ -262,7 +262,7 @@ export const QuadTransformSidebar: React.FC<QuadTransformSidebarProps> = ({
           )}
           <div className="flex gap-2">
             <Tooltip
-              label="Vẽ đường spline (Catmull–Rom) đi qua các điểm đã chọn — cần ≥ 3 điểm trên contour đầu tiên trong danh sách"
+              label="Vẽ đường spline (Catmull–Rom) đi qua các điểm đã chọn — cần ≥ 3 điểm trên contour được chọn hiện tại"
               side="top"
               block
             >
@@ -290,7 +290,7 @@ export const QuadTransformSidebar: React.FC<QuadTransformSidebarProps> = ({
               (s) => s.contourId === selectedQuadContourIds[0],
             ).length < 3 && (
               <div className="mt-1 text-xs text-amber-400">
-                Cần ít nhất 3 điểm trên contour đầu để vẽ spline
+                Cần ít nhất 3 điểm trên contour được chọn hiện tại để vẽ spline
               </div>
             )}
         </div>
@@ -467,7 +467,7 @@ export const QuadTransformSidebar: React.FC<QuadTransformSidebarProps> = ({
               type="button"
               onClick={onResetQuadToMinRect}
               disabled={loading || selectedQuadContourIds.length === 0}
-              title="Reset polygon theo Douglas-Peucker cho contour đang chọn; đồng thời xóa spline liên quan."
+              title="Reset polygon về đường bao nhỏ nhất cho contour đang chọn; đồng thời xóa spline liên quan."
               className={`w-full px-3 py-2 rounded text-xs font-medium transition-colors ${
                 selectedQuadContourIds.length === 0 || loading
                   ? 'bg-gray-600 cursor-not-allowed opacity-50 text-gray-400'
@@ -518,7 +518,7 @@ export const QuadTransformSidebar: React.FC<QuadTransformSidebarProps> = ({
             </button>
           </Tooltip>
 
-          <Tooltip label="Thoát Quad Transform và quay lại panel TOOLS" side="left" block>
+          <Tooltip label="Thoát chế độ Quad Transform và quay lại panel TOOLS" side="left" block>
             <button
               onClick={onExitQuadMode}
               className="w-full px-3 py-2 bg-red-600 rounded text-xs font-medium hover:bg-red-700 transition-colors"
