@@ -220,16 +220,26 @@ def centripetal_symmetric(img: np.ndarray) -> np.ndarray:
     return new_img
 
 def normalize_to_binary(img_array: np.ndarray) -> np.ndarray:
-    """Chuẩn hóa ảnh về binary (đen trắng)"""
+    """Chuẩn hóa ảnh về binary (đen trắng) bằng Otsu + định hướng nền theo viền ảnh."""
     # Nếu là RGB, chuyển sang grayscale
     if len(img_array.shape) == 3:
         img_gray = cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY)
     else:
         img_gray = img_array.copy()
-    
-    # Threshold để tạo binary image
-    _, binary = cv2.threshold(img_gray, 127, 255, cv2.THRESH_BINARY)
-    
+
+    # Giảm nhiễu nhẹ trước threshold để biên ổn định hơn.
+    blur = cv2.GaussianBlur(img_gray, (5, 5), 0)
+    _, binary = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+
+    # Xác định nền theo viền ảnh: nếu viền đang trắng -> đảo để nền thành đen.
+    h, w = binary.shape
+    if h > 2 and w > 2:
+        border = np.concatenate(
+            [binary[0, :], binary[h - 1, :], binary[:, 0], binary[:, w - 1]]
+        )
+        if float(np.mean(border)) > 127.0:
+            binary = cv2.bitwise_not(binary)
+
     return binary
 
 
